@@ -607,5 +607,10 @@ export default {
       }
     },
 
+    runninghub: {
+      title: 'RunningHub Account Pool',
+      description: 'Manage RunningHub accounts, credits, concurrency, and workflows'
+    },
+
     // Ops Monitoring
 }

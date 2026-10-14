@@ -550,6 +550,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/runninghub',
+    name: 'AdminRunningHub',
+    component: () => import('@/views/admin/RunningHubView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'RunningHub 账号池',
+      titleKey: 'admin.runninghub.title',
+      descriptionKey: 'admin.runninghub.description'
+    }
+  },
+  {
     path: '/admin/proxies',
     name: 'AdminProxies',
     component: () => import('@/views/admin/ProxiesView.vue'),

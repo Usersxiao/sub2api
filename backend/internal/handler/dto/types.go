@@ -51,6 +51,8 @@ type AdminUser struct {
 	// RestrictPublicGroups 为 true 时，该用户仅可使用 allowed_groups 中列出的
 	// 公开分组。这是管理侧的权限开关，不下发给用户自身的接口。
 	RestrictPublicGroups bool `json:"restrict_public_groups"`
+	// RHCredits RunningHub 任务积分余额（nil 表示未配置）
+	RHCredits *float64 `json:"rh_credits,omitempty"`
 }
 
 type APIKey struct {

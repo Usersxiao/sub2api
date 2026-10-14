@@ -395,7 +395,11 @@ func (s *PaymentService) doBalance(ctx context.Context, o *dbent.PaymentOrder, l
 	if err := s.applyAffiliateRebateForOrder(ctx, o); err != nil {
 		return err
 	}
-	return s.markCompleted(ctx, o, lease, "RECHARGE_SUCCESS")
+	if err := s.markCompleted(ctx, o, lease, "RECHARGE_SUCCESS"); err != nil {
+		return err
+	}
+	s.grantRHCreditsForOrder(ctx, o)
+	return nil
 }
 
 func (s *PaymentService) markCompleted(ctx context.Context, o *dbent.PaymentOrder, lease *paymentFulfillmentLease, auditAction string) error {
@@ -550,7 +554,13 @@ func (s *PaymentService) doSub(ctx context.Context, o *dbent.PaymentOrder, lease
 	if err := s.applyAffiliateRebateForOrder(ctx, o); err != nil {
 		return err
 	}
-	return s.markCompleted(ctx, o, lease, "SUBSCRIPTION_SUCCESS")
+	if err := s.markCompleted(ctx, o, lease, "SUBSCRIPTION_SUCCESS"); err != nil {
+		return err
+	}
+	// Award rh_credits proportional to the order amount and the yuan_to_coin exchange rate.
+	// This is best-effort: a grant failure must not fail the subscription itself.
+	s.grantRHCreditsForOrder(ctx, o)
+	return nil
 }
 
 func (s *PaymentService) ensurePaymentSubscriptionAssigned(ctx context.Context, o *dbent.PaymentOrder, groupID int64, days int) error {
@@ -887,4 +897,32 @@ func (s *PaymentService) RetryFulfillment(ctx context.Context, oid int64) error 
 	}
 	s.writeAuditLog(ctx, oid, "RECHARGE_RETRY", "admin", map[string]any{"detail": "admin manual retry"})
 	return s.executeFulfillment(ctx, oid)
+}
+
+// grantRHCreditsForOrder awards rh_credits after a payment order completes.
+// It reads the yuan_to_coin exchange rate from runninghub_settings and calls
+// RHCreditsGranter.GrantRH. Failures are logged and swallowed — a grant failure
+// must never roll back or fail the payment that already completed.
+func (s *PaymentService) grantRHCreditsForOrder(ctx context.Context, o *dbent.PaymentOrder) {
+	if s.rhCreditsGranter == nil {
+		return
+	}
+	settings, err := s.rhCreditsGranter.GetSettings(ctx)
+	if err != nil || settings.YuanToCoin <= 0 {
+		slog.Warn("grantRHCreditsForOrder: could not read yuan_to_coin, skipping",
+			"orderID", o.ID, "err", err)
+		return
+	}
+	credits := o.Amount * settings.YuanToCoin
+	if credits <= 0 {
+		return
+	}
+	if _, grantErr := s.rhCreditsGranter.GrantRH(ctx, o.UserID, credits); grantErr != nil {
+		slog.Error("grantRHCreditsForOrder: GrantRH failed (payment already completed)",
+			"orderID", o.ID, "userID", o.UserID, "credits", credits, "err", grantErr)
+		return
+	}
+	slog.Info("grantRHCreditsForOrder: granted rh_credits",
+		"orderID", o.ID, "userID", o.UserID, "yuan", o.Amount,
+		"rate", settings.YuanToCoin, "credits", credits)
 }

@@ -112,6 +112,8 @@ export interface AdminUser extends User {
   restrict_public_groups?: boolean
   // 当前并发数（仅管理员列表接口返回）
   current_concurrency?: number
+  // RunningHub 积分余额（任务实际扣费池）— 按需加载，不随列表返回
+  rh_credits?: number | null
 }
 
 export interface LoginRequest {

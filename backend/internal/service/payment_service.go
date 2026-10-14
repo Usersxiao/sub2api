@@ -199,6 +199,7 @@ type PaymentService struct {
 	resumeService            *PaymentResumeService
 	affiliateService         *AffiliateService
 	notificationEmailService *NotificationEmailService
+	rhCreditsGranter         RHCreditsGranter
 }
 
 func NewPaymentService(entClient *dbent.Client, registry *payment.Registry, loadBalancer payment.LoadBalancer, redeemService *RedeemService, subscriptionSvc *SubscriptionService, configService *PaymentConfigService, userRepo UserRepository, groupRepo GroupRepository, affiliateService *AffiliateService) *PaymentService {
@@ -209,6 +210,12 @@ func NewPaymentService(entClient *dbent.Client, registry *payment.Registry, load
 
 func (s *PaymentService) SetNotificationEmailService(notificationEmailService *NotificationEmailService) {
 	s.notificationEmailService = notificationEmailService
+}
+
+// SetRHCreditsGranter injects the RunningHub credits granter so that
+// payment fulfillment can automatically award rh_credits when an order completes.
+func (s *PaymentService) SetRHCreditsGranter(g RHCreditsGranter) {
+	s.rhCreditsGranter = g
 }
 
 // --- Provider Registry ---

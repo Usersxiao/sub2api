@@ -67,6 +67,21 @@
         <p class="input-hint">{{ t('admin.users.form.rpmLimitHint') }}</p>
       </div>
       <UserAttributeForm v-model="form.customAttributes" :user-id="user?.id" />
+
+      <!-- RH 积分 -->
+      <div>
+        <label class="input-label">RH 积分</label>
+        <div class="flex gap-2 items-center">
+          <input
+            v-model.number="form.rh_credits_grant"
+            type="number"
+            step="any"
+            class="input"
+            placeholder="输入授予数量（正增负减），留空不修改"
+          />
+        </div>
+        <p class="input-hint">当前余额：{{ user?.rh_credits != null ? Number(user.rh_credits).toLocaleString() : '未知' }}。填写数量后点更新即生效。</p>
+      </div>
     </form>
     <template #footer>
       <div class="flex justify-end gap-3">
@@ -113,12 +128,13 @@ const form = reactive({
   role: 'user' as AdminUser['role'],
   concurrency: 1,
   rpm_limit: 0,
+  rh_credits_grant: null as number | null,
   customAttributes: {} as UserAttributeValuesMap
 })
 
 watch(() => props.user, (u) => {
   if (u) {
-    Object.assign(form, { email: u.email, password: '', username: u.username || '', notes: u.notes || '', role: u.role || 'user', concurrency: u.concurrency, rpm_limit: u.rpm_limit ?? 0, customAttributes: {} })
+    Object.assign(form, { email: u.email, password: '', username: u.username || '', notes: u.notes || '', role: u.role || 'user', concurrency: u.concurrency, rpm_limit: u.rpm_limit ?? 0, rh_credits_grant: null, customAttributes: {} })
     passwordCopied.value = false
   }
 }, { immediate: true })
@@ -154,6 +170,11 @@ const handleUpdateUser = async () => {
     // 提升为管理员属敏感操作：后端返回 STEP_UP_REQUIRED 时弹 TOTP 验证并重试
     await stepUp.run(() => adminAPI.users.update(userId, data))
     if (Object.keys(form.customAttributes).length > 0) await adminAPI.userAttributes.updateUserAttributeValues(userId, form.customAttributes)
+    // 如果填写了 RH 积分授予数量，提交积分变更
+    if (form.rh_credits_grant != null && form.rh_credits_grant !== 0) {
+      const { grantRHCredits } = await import('@/api/admin/runninghub')
+      await grantRHCredits(userId, form.rh_credits_grant)
+    }
     appStore.showSuccess(t('admin.users.userUpdated'))
     emit('success'); emit('close')
   } catch (e: any) {

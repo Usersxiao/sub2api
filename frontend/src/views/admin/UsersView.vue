@@ -457,9 +457,23 @@
             </div>
           </template>
 
-          <template #cell-balance_platform_quota="{ row }">
-            <button
-              type="button"
+          <!-- RH 积分列：直接从列表数据读取，点击"授予"可修改 -->
+          <template #cell-rh_credits="{ row }">
+            <div class="flex items-center gap-2">
+              <span class="font-medium tabular-nums text-gray-900 dark:text-white">
+                {{ row.rh_credits != null ? Number(row.rh_credits).toLocaleString() : '—' }}
+              </span>
+              <button
+                class="rounded px-2 py-0.5 text-xs font-medium text-violet-600 transition-colors hover:bg-violet-50 dark:text-violet-400 dark:hover:bg-violet-900/20"
+                title="授予 RH 积分"
+                @click.stop="handleGrantRH(row)"
+              >
+                授予
+              </button>
+            </div>
+          </template>
+
+          <template #cell-balance_platform_quota="{ row }">            <button              type="button"
               class="block text-left underline decoration-dashed decoration-gray-300 underline-offset-4 transition-colors hover:decoration-primary-400 dark:decoration-dark-500"
               :title="t('admin.users.platformQuota.cellColumnTooltip')"
               @click="handlePlatformQuota(row)"
@@ -741,6 +755,15 @@
                 {{ t('admin.users.balanceHistory') }}
               </button>
 
+              <!-- Grant RH Credits -->
+              <button
+                @click="handleGrantRH(user); closeActionMenu()"
+                class="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-dark-700"
+              >
+                <span class="text-violet-500 text-xs font-bold">◆</span>
+                授予 RH 积分
+              </button>
+
               <div class="my-1 border-t border-gray-100 dark:border-dark-700"></div>
 
               <!-- Delete (not for admin) -->
@@ -829,6 +852,7 @@ import UserApiKeysModal from '@/components/admin/user/UserApiKeysModal.vue'
 import UserAllowedGroupsModal from '@/components/admin/user/UserAllowedGroupsModal.vue'
 import UserBalanceModal from '@/components/admin/user/UserBalanceModal.vue'
 import UserBalanceHistoryModal from '@/components/admin/user/UserBalanceHistoryModal.vue'
+import { getUserCredits, grantRHCredits } from '@/api/admin/runninghub'
 import GroupReplaceModal from '@/components/admin/user/GroupReplaceModal.vue'
 
 const appStore = useAppStore()
@@ -891,6 +915,7 @@ const allColumns = computed<Column[]>(() => [
   { key: 'groups', label: t('admin.users.columns.groups'), sortable: false },
   { key: 'subscriptions', label: t('admin.users.columns.subscriptions'), sortable: false },
   { key: 'balance', label: t('admin.users.columns.balance'), sortable: true },
+  { key: 'rh_credits', label: 'RH 积分', sortable: false },
   { key: 'balance_platform_quota', label: t('admin.users.columns.balancePlatformQuota'), sortable: false },
   { key: 'usage', label: t('admin.users.columns.usage'), sortable: false },
   { key: 'usage_anthropic', label: t('admin.users.columns.usageAnthropic'), sortable: false },
@@ -1554,6 +1579,40 @@ const groupReplaceOldGroup = ref<{ id: number; name: string } | null>(null)
 const showBalanceModal = ref(false)
 const balanceUser = ref<AdminUser | null>(null)
 const balanceOperation = ref<'add' | 'subtract'>('add')
+
+// RH 积分缓存 — 按需加载（点击"授予"时触发）
+const rhCreditsCache = ref<Record<number, number | null>>({})
+
+const handleGrantRH = async (user: AdminUser) => {
+  // 显示当前余额（优先读列表里已有的 rh_credits，没有再拉一次）
+  const currentFromList = user.rh_credits != null ? Number(user.rh_credits) : null
+  let current = currentFromList ?? rhCreditsCache.value[user.id] ?? null
+  if (current == null) {
+    try {
+      const { rh_credits } = await getUserCredits(user.id)
+      current = rh_credits
+      rhCreditsCache.value[user.id] = rh_credits
+    } catch { /* 拉取失败忽略，提示里不显示当前余额 */ }
+  }
+  const hint = current != null ? `（当前 ${current.toLocaleString()} 积分）` : ''
+  const input = window.prompt(`授予 RH 积分给 ${user.email}${hint}\n\n输入要授予的数量（正数为增加，负数为扣除）：`)
+  if (input === null || input.trim() === '') return
+  const amount = Number(input.trim())
+  if (!Number.isFinite(amount) || amount === 0) {
+    window.alert('请输入有效的非零数字')
+    return
+  }
+  try {
+    const { rh_credits } = await grantRHCredits(user.id, amount)
+    // 更新列表里对应用户行的 rh_credits，不需要重新加载整个列表
+    const idx = users.value.findIndex((u) => u.id === user.id)
+    if (idx >= 0) (users.value[idx] as AdminUser).rh_credits = rh_credits
+    rhCreditsCache.value[user.id] = rh_credits
+    window.alert(`授予成功！${user.email} 当前 RH 积分：${rh_credits.toLocaleString()}`)
+  } catch (e) {
+    window.alert(`授予失败：${e instanceof Error ? e.message : String(e)}`)
+  }
+}
 
 // Balance History modal state
 const showBalanceHistoryModal = ref(false)

@@ -604,5 +604,10 @@ export default {
       }
     },
 
+    runninghub: {
+      title: 'RunningHub 账号池',
+      description: '管理 RunningHub 账号、额度、并发和工作流'
+    },
+
     // Ops Monitoring
 }

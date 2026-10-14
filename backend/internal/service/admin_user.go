@@ -61,7 +61,54 @@ func (s *adminServiceImpl) ListUsers(ctx context.Context, page, pageSize int, fi
 			s.loadUserGroupRatesOneByOne(ctx, users)
 		}
 	}
+	// 批量加载 RunningHub 积分余额（LEFT JOIN 一次查询，不多发 N 个请求）
+	if len(users) > 0 {
+		userIDs := make([]int64, 0, len(users))
+		for i := range users {
+			userIDs = append(userIDs, users[i].ID)
+		}
+		rhCreditsByUser, rhErr := s.loadRHCreditsBatch(ctx, userIDs)
+		if rhErr != nil {
+			logger.LegacyPrintf("service.admin", "failed to load rh_credits in batch: err=%v", rhErr)
+		} else {
+			for i := range users {
+				if c, ok := rhCreditsByUser[users[i].ID]; ok {
+					users[i].RHCredits = &c
+				}
+			}
+		}
+	}
 	return users, result.Total, nil
+}
+
+// loadRHCreditsBatch queries runninghub_user_credits for a slice of user IDs in one round trip.
+func (s *adminServiceImpl) loadRHCreditsBatch(ctx context.Context, userIDs []int64) (map[int64]float64, error) {
+	if s.entClient == nil || len(userIDs) == 0 {
+		return nil, nil
+	}
+	// Build the IN clause manually to avoid importing lib/pq into the admin service.
+	placeholders := make([]string, len(userIDs))
+	args := make([]any, len(userIDs))
+	for i, id := range userIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	query := "SELECT user_id, rh_credits FROM runninghub_user_credits WHERE user_id IN (" + strings.Join(placeholders, ",") + ")"
+	rows, err := s.entClient.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[int64]float64, len(userIDs))
+	for rows.Next() {
+		var uid int64
+		var credits float64
+		if err := rows.Scan(&uid, &credits); err != nil {
+			return nil, err
+		}
+		out[uid] = credits
+	}
+	return out, rows.Err()
 }
 
 func (s *adminServiceImpl) loadUserGroupRatesOneByOne(ctx context.Context, users []User) {
