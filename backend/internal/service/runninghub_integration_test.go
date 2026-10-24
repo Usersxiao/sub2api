@@ -178,7 +178,7 @@ func (e *rhEnv) settings(consumer, enterprise bool, yuanToCoin float64) {
 func (e *rhEnv) workflow(webappID string, estimated float64, nodes []rhNode) {
 	_, err := e.db.ExecContext(e.ctx,
 		`INSERT INTO runninghub_workflows(webapp_id,name,estimated_rh,node_info_list,enabled,instance_type)
-		 VALUES($1,$1,$2,$3,true,'plus')`, webappID, estimated, string(mustJSON(nodes)))
+		 VALUES($1,$1,$2,$3,true,'plus')`, webappID, estimated, string(mustRHJSON(nodes)))
 	require.NoError(e.t, err)
 }
 

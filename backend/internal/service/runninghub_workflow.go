@@ -210,7 +210,7 @@ func (s *RunningHubService) CreateWorkflow(ctx context.Context, in RunningHubWor
 		    (webapp_id, name, description, cover_url, instance_type, estimated_rh, avg_running_seconds, node_info_list)
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING `+rhWorkflowCols,
 		in.WebappID, strings.TrimSpace(in.Name), in.Description, coverURL, in.InstanceType,
-		in.EstimatedRH, avgSec, mustJSON(nodes)))
+		in.EstimatedRH, avgSec, mustRHJSON(nodes)))
 }
 
 // RefreshWorkflowNodes re-pulls the node list from RunningHub and replaces the
@@ -245,7 +245,7 @@ func (s *RunningHubService) RefreshWorkflowNodes(ctx context.Context, id int64) 
 	w, err = scanRHWorkflow(s.db.QueryRowContext(ctx,
 		`UPDATE runninghub_workflows
 		    SET node_info_list=$2::jsonb, avg_running_seconds=$3, cover_url=$4, updated_at=NOW()
-		 WHERE id=$1 RETURNING `+rhWorkflowCols, id, string(mustJSON(fresh)), avgSec, coverURL))
+		 WHERE id=$1 RETURNING `+rhWorkflowCols, id, string(mustRHJSON(fresh)), avgSec, coverURL))
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, ErrRunningHubNotFound
 	}
@@ -270,7 +270,7 @@ func (s *RunningHubService) UpdateWorkflow(ctx context.Context, id int64, u Runn
 		if err != nil {
 			return cur, err
 		}
-		nodes = mustJSON(merged)
+		nodes = mustRHJSON(merged)
 	}
 	w, err := scanRHWorkflow(s.db.QueryRowContext(ctx,
 		`UPDATE runninghub_workflows SET
@@ -352,4 +352,4 @@ func nullableJSON(b []byte) any {
 	return string(b)
 }
 
-func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
+func mustRHJSON(v any) []byte { b, _ := json.Marshal(v); return b }
