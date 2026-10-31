@@ -380,13 +380,16 @@ func (p *fakeProcessorProvider) Cleanup(context.Context, *BatchImageJob, *Accoun
 }
 
 type fakeBatchImageRepository struct {
-	jobs          map[string]*BatchImageJob
-	items         map[string][]CreateBatchImageItemParams
-	counts        map[string]BatchImageCounts
-	transitions   map[string][]string
-	events        map[string][]string
-	transitionErr error
-	replaceCalls  int
+	jobs              map[string]*BatchImageJob
+	items             map[string][]CreateBatchImageItemParams
+	counts            map[string]BatchImageCounts
+	transitions       map[string][]string
+	events            map[string][]string
+	transitionErr     error
+	replaceCalls      int
+	nativeCreateCalls int
+	nativeCreateErr   error
+	nativeCreateHook  func(context.Context, CreateBatchImageJobParams) error
 }
 
 func newFakeBatchImageRepository() *fakeBatchImageRepository {
@@ -430,6 +433,27 @@ func (r *fakeBatchImageRepository) CreateBatchImageJob(_ context.Context, params
 	}
 	r.jobs[job.BatchID] = job
 	return job, nil
+}
+
+func (r *fakeBatchImageRepository) CreateBatchImageJobWithBalanceHold(ctx context.Context, params CreateBatchImageJobParams) (*BatchImageJob, error) {
+	r.nativeCreateCalls++
+	if r.nativeCreateErr != nil {
+		return nil, r.nativeCreateErr
+	}
+	// Service tests retain their separate billing fake and its failure seams.
+	// Database tests verify the real atomic money/birth transaction boundary.
+	if r.nativeCreateHook != nil {
+		if err := r.nativeCreateHook(ctx, params); err != nil {
+			return nil, err
+		}
+	}
+	return r.CreateBatchImageJob(ctx, params)
+}
+
+func fakeBatchImageNativeReserve(ctx context.Context, params CreateBatchImageJobParams, billing UsageBillingRepository) error {
+	job := &BatchImageJob{BatchID: params.BatchID, UserID: params.UserID, APIKeyID: params.APIKeyID,
+		EstimatedCost: params.EstimatedCost, HoldAmount: params.HoldAmount, RequestHash: params.RequestHash}
+	return reserveBatchImageBalanceHold(ctx, billing, job, batchImageDerefString(params.RequestHash))
 }
 
 func (r *fakeBatchImageRepository) GetBatchImageJobByBatchID(_ context.Context, batchID string) (*BatchImageJob, error) {

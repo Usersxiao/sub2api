@@ -30,7 +30,7 @@ func newEmailOAuthAutoAuthService(
 
 	settingService := NewSettingService(&settingRepoStub{values: settings}, cfg)
 
-	return NewAuthService(
+	return withUnitAuthSessions(NewAuthService(
 		nil, // entClient — nil, updateUserSignupSource early return
 		userRepo,
 		nil, // redeemRepo — invitationCode="" 时不触发
@@ -44,7 +44,7 @@ func newEmailOAuthAutoAuthService(
 		nil, // defaultSubAssigner — nil, assignSubscriptions early return
 		nil, // affiliateService — nil, bindOAuthAffiliate early return
 		quotaRepo,
-	)
+	))
 }
 
 func TestEmailOAuthAuto_SnapshotsPlatformQuotaDefaults(t *testing.T) {

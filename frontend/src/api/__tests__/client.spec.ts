@@ -9,8 +9,14 @@ vi.mock('@/i18n', () => ({
 
 describe('API Client', () => {
   let apiClient: AxiosInstance
+  let originalLocks: PropertyDescriptor | undefined
 
   beforeEach(async () => {
+    originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: { request: vi.fn(async (_name: string, callback: () => Promise<unknown>) => callback()) },
+    })
     localStorage.clear()
     sessionStorage.clear()
     window.history.replaceState({}, '', '/')
@@ -23,6 +29,11 @@ describe('API Client', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllEnvs()
+    if (originalLocks) {
+      Object.defineProperty(navigator, 'locks', originalLocks)
+    } else {
+      Reflect.deleteProperty(navigator, 'locks')
+    }
   })
 
   // --- 请求拦截器 ---

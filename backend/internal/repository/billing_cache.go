@@ -2,9 +2,12 @@ package repository
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/rand/v2"
 	"strconv"
 	"strings"
@@ -137,11 +140,27 @@ var (
 )
 
 type billingCache struct {
-	rdb *redis.Client
+	rdb         *redis.Client
+	quotaDomain *service.UserPlatformQuotaCacheDomain
 }
 
+// Legacy construction is retained for compatibility fixtures. Production Wire
+// uses ProvideBillingCache and never adopts legacy quota hashes or dirty state.
 func NewBillingCache(rdb *redis.Client) service.BillingCache {
 	return &billingCache{rdb: rdb}
+}
+
+// No persisted domain has completed a baseline handoff yet. Keep every legacy
+// quota port closed before any Redis command, including empty batches/dirty
+// sets. Redis contents, a cache miss and the flusher flag cannot grant access.
+func (c *billingCache) quotaCacheAccessError() error {
+	if c == nil {
+		return service.ErrUserPlatformQuotaWriterUnavailable
+	}
+	if c.quotaDomain != nil {
+		return service.ErrUserPlatformQuotaCacheHandoffRequired
+	}
+	return nil
 }
 
 func (c *billingCache) GetUserBalance(ctx context.Context, userID int64) (float64, error) {
@@ -379,152 +398,304 @@ func userPlatformQuotaCacheKey(userID int64, platform string) string {
 	return fmt.Sprintf("billing:user_platform_quota:%d:%s", userID, platform)
 }
 
-// parseUserPlatformQuotaHash 将 Redis HGETALL 返回的 map[string]string 反序列化为
-// *service.UserPlatformQuotaCacheEntry。空 map（key 不存在）返回 nil。
-// GetUserPlatformQuotaCache 和 BatchGetUserPlatformQuotaCache 共用此函数，确保解析逻辑一致。
-func parseUserPlatformQuotaHash(m map[string]string) *service.UserPlatformQuotaCacheEntry {
+var errUserPlatformQuotaCacheInvalid = errors.New("invalid user platform quota cache")
+
+func invalidUserPlatformQuotaCache(field string) error {
+	return fmt.Errorf("%w: %s", errUserPlatformQuotaCacheInvalid, field)
+}
+
+func validUserPlatformQuotaCacheInstance(instance string) bool {
+	if len(instance) != 64 {
+		return false
+	}
+	for _, c := range instance {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateUserPlatformQuotaCacheEntry(entry *service.UserPlatformQuotaCacheEntry, complete bool) error {
+	if entry == nil {
+		return invalidUserPlatformQuotaCache("nil entry")
+	}
+	if entry.SchemaVersion != 0 && entry.SchemaVersion != service.UserPlatformQuotaCacheSchemaV1 {
+		return invalidUserPlatformQuotaCache("schema_version")
+	}
+	if entry.Version < 0 {
+		return invalidUserPlatformQuotaCache("version")
+	}
+	for _, value := range []float64{entry.DailyUsageUSD, entry.WeeklyUsageUSD, entry.MonthlyUsageUSD} {
+		if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			return invalidUserPlatformQuotaCache("usage")
+		}
+	}
+	for _, value := range []*float64{entry.DailyLimitUSD, entry.WeeklyLimitUSD, entry.MonthlyLimitUSD} {
+		if value != nil && (*value < 0 || math.IsNaN(*value) || math.IsInf(*value, 0)) {
+			return invalidUserPlatformQuotaCache("limit")
+		}
+	}
+	if !((entry.QuotaRowID == 0 && entry.ControlGeneration == 0) || (entry.QuotaRowID > 0 && entry.ControlGeneration > 0)) {
+		return invalidUserPlatformQuotaCache("flush token")
+	}
+	if entry.CacheInstance != "" && !validUserPlatformQuotaCacheInstance(entry.CacheInstance) {
+		return invalidUserPlatformQuotaCache("cache_instance")
+	}
+	for _, value := range []*time.Time{entry.DailyWindowStart, entry.WeeklyWindowStart, entry.MonthlyWindowStart} {
+		if value != nil && (value.Unix() < 0 || value.Unix() > 253402300799) {
+			return invalidUserPlatformQuotaCache("window_start")
+		}
+		if complete && value == nil {
+			return invalidUserPlatformQuotaCache("incomplete window_start")
+		}
+	}
+	if complete && (entry.QuotaRowID <= 0 || entry.ControlGeneration <= 0 || entry.SchemaVersion != service.UserPlatformQuotaCacheSchemaV1) {
+		return invalidUserPlatformQuotaCache("incomplete identity")
+	}
+	return nil
+}
+
+// Missing legacy identity/instance is readable, but never becomes a CAS token.
+// Malformed values are errors rather than fabricated zero usage/unlimited limits.
+func parseUserPlatformQuotaHash(m map[string]string) (*service.UserPlatformQuotaCacheEntry, error) {
 	if len(m) == 0 {
-		return nil
+		return nil, nil
 	}
-	parseFloat := func(s string) float64 {
-		if s == "" {
-			return 0
+	parseInt := func(field string, optional bool) (int64, error) {
+		raw, exists := m[field]
+		if !exists && optional {
+			return 0, nil
 		}
-		f, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			log.Printf("billing_cache: corrupt quota usage field %q (using 0): %v", s, err)
-			return 0
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value < 0 || strconv.FormatInt(value, 10) != raw {
+			return 0, invalidUserPlatformQuotaCache(field)
 		}
-		return f
+		return value, nil
 	}
-	parseFloatPtr := func(s string) *float64 {
-		if s == "" {
-			return nil
-		}
-		f, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			return nil
-		}
-		return &f
+	entry := new(service.UserPlatformQuotaCacheEntry)
+	var err error
+	if entry.SchemaVersion, err = parseInt("schema_version", true); err != nil {
+		return nil, err
 	}
-	parseTimePtr := func(s string) *time.Time {
-		if s == "" {
-			return nil
+	if entry.Version, err = parseInt("version", entry.SchemaVersion == 0); err != nil {
+		return nil, err
+	}
+	for _, field := range []struct {
+		name   string
+		target *float64
+	}{{"daily_usage", &entry.DailyUsageUSD}, {"weekly_usage", &entry.WeeklyUsageUSD}, {"monthly_usage", &entry.MonthlyUsageUSD}} {
+		raw, exists := m[field.name]
+		value, parseErr := strconv.ParseFloat(raw, 64)
+		if !exists || raw == "" || parseErr != nil || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			return nil, invalidUserPlatformQuotaCache(field.name)
 		}
-		n, err := strconv.ParseInt(s, 10, 64)
-		if err != nil {
-			return nil
+		*field.target = value
+	}
+	for _, field := range []struct {
+		name   string
+		target **float64
+	}{{"daily_limit", &entry.DailyLimitUSD}, {"weekly_limit", &entry.WeeklyLimitUSD}, {"monthly_limit", &entry.MonthlyLimitUSD}} {
+		raw, exists := m[field.name]
+		if !exists && entry.SchemaVersion == service.UserPlatformQuotaCacheSchemaV1 {
+			return nil, invalidUserPlatformQuotaCache(field.name)
 		}
-		t := time.Unix(n, 0).UTC()
-		return &t
+		if raw == "" {
+			continue
+		}
+		value, parseErr := strconv.ParseFloat(raw, 64)
+		if parseErr != nil || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			return nil, invalidUserPlatformQuotaCache(field.name)
+		}
+		*field.target = &value
 	}
-	parseInt64 := func(s string) int64 {
-		n, _ := strconv.ParseInt(s, 10, 64)
-		return n
+	for _, field := range []struct {
+		name   string
+		target **time.Time
+	}{{"daily_window_start", &entry.DailyWindowStart}, {"weekly_window_start", &entry.WeeklyWindowStart}, {"monthly_window_start", &entry.MonthlyWindowStart}} {
+		raw, exists := m[field.name]
+		if !exists && entry.SchemaVersion == service.UserPlatformQuotaCacheSchemaV1 {
+			return nil, invalidUserPlatformQuotaCache(field.name)
+		}
+		if raw == "" {
+			continue
+		}
+		seconds, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || seconds < 0 || seconds > 253402300799 || strconv.FormatInt(seconds, 10) != raw {
+			return nil, invalidUserPlatformQuotaCache(field.name)
+		}
+		value := time.Unix(seconds, 0).UTC()
+		*field.target = &value
 	}
-	return &service.UserPlatformQuotaCacheEntry{
-		DailyUsageUSD:      parseFloat(m["daily_usage"]),
-		WeeklyUsageUSD:     parseFloat(m["weekly_usage"]),
-		MonthlyUsageUSD:    parseFloat(m["monthly_usage"]),
-		Version:            parseInt64(m["version"]),
-		SchemaVersion:      parseInt64(m["schema_version"]),
-		DailyLimitUSD:      parseFloatPtr(m["daily_limit"]),
-		WeeklyLimitUSD:     parseFloatPtr(m["weekly_limit"]),
-		MonthlyLimitUSD:    parseFloatPtr(m["monthly_limit"]),
-		DailyWindowStart:   parseTimePtr(m["daily_window_start"]),
-		WeeklyWindowStart:  parseTimePtr(m["weekly_window_start"]),
-		MonthlyWindowStart: parseTimePtr(m["monthly_window_start"]),
+	_, hasRow := m["quota_row_id"]
+	_, hasGeneration := m["control_generation"]
+	if hasRow != hasGeneration {
+		return nil, invalidUserPlatformQuotaCache("partial flush token")
 	}
+	if hasRow {
+		if entry.QuotaRowID, err = parseInt("quota_row_id", false); err != nil {
+			return nil, err
+		}
+		if entry.ControlGeneration, err = parseInt("control_generation", false); err != nil {
+			return nil, err
+		}
+	}
+	entry.CacheInstance = m["cache_instance"]
+	if err := validateUserPlatformQuotaCacheEntry(entry, false); err != nil {
+		return nil, err
+	}
+	return entry, nil
 }
 
 func (c *billingCache) GetUserPlatformQuotaCache(ctx context.Context, userID int64, platform string) (*service.UserPlatformQuotaCacheEntry, bool, error) {
-	key := userPlatformQuotaCacheKey(userID, platform)
-	m, err := c.rdb.HGetAll(ctx, key).Result()
+	if err := c.quotaCacheAccessError(); err != nil {
+		return nil, false, err
+	}
+	m, err := c.rdb.HGetAll(ctx, userPlatformQuotaCacheKey(userID, platform)).Result()
 	if err != nil {
 		return nil, false, err
 	}
-	entry := parseUserPlatformQuotaHash(m)
-	if entry == nil {
-		// 空 map → key 不存在 → MISS
-		return nil, false, nil
+	entry, err := parseUserPlatformQuotaHash(m)
+	if err != nil {
+		return nil, false, err
 	}
-	return entry, true, nil
+	return entry, entry != nil, nil
+}
+
+func userPlatformQuotaCacheTTL(ttl time.Duration) (int64, error) {
+	if ttl <= 0 || ttl%time.Second != 0 {
+		return 0, invalidUserPlatformQuotaCache("ttl must be positive whole seconds")
+	}
+	return int64(ttl / time.Second), nil
+}
+
+func newUserPlatformQuotaCacheInstance() (string, error) {
+	var nonce [32]byte
+	if _, err := cryptorand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("quota cache instance: %w", err)
+	}
+	return hex.EncodeToString(nonce[:]), nil
+}
+
+// All arguments are validated and formatted before the script. One HSET writes
+// the complete entry; no numeric mutation can partly run before a later error.
+// Identity/revision comparisons stay decimal strings to preserve int64 precision.
+const compareAndSetUserPlatformQuotaCacheScript = `
+local kind = redis.call("TYPE", KEYS[1]).ok
+if kind ~= "none" and kind ~= "hash" then
+    return redis.error_reply("invalid quota cache key type")
+end
+if ARGV[1] == "nx" then
+    if kind ~= "none" then return 0 end
+elseif ARGV[1] == "cas" then
+    if kind ~= "hash" then return 0 end
+    if redis.call("HGET", KEYS[1], "cache_instance") ~= ARGV[2]
+       or redis.call("HGET", KEYS[1], "version") ~= ARGV[3]
+       or redis.call("HGET", KEYS[1], "quota_row_id") ~= ARGV[4]
+       or redis.call("HGET", KEYS[1], "control_generation") ~= ARGV[5]
+       or redis.call("HGET", KEYS[1], "schema_version") ~= ARGV[6] then
+        return 0
+    end
+end
+redis.call("HSET", KEYS[1],
+    "cache_instance", ARGV[8], "version", ARGV[9],
+    "quota_row_id", ARGV[10], "control_generation", ARGV[11], "schema_version", ARGV[12],
+    "daily_usage", ARGV[13], "weekly_usage", ARGV[14], "monthly_usage", ARGV[15],
+    "daily_limit", ARGV[16], "weekly_limit", ARGV[17], "monthly_limit", ARGV[18],
+    "daily_window_start", ARGV[19], "weekly_window_start", ARGV[20], "monthly_window_start", ARGV[21])
+redis.call("EXPIRE", KEYS[1], ARGV[7])
+return 1
+`
+
+func quotaCacheWriteArgs(mode string, expected, next *service.UserPlatformQuotaCacheEntry, ttlSeconds int64) []any {
+	args := []any{mode, "", "", "", "", "", strconv.FormatInt(ttlSeconds, 10)}
+	if expected != nil {
+		args[1], args[2], args[3], args[4], args[5] = expected.CacheInstance, strconv.FormatInt(expected.Version, 10),
+			strconv.FormatInt(expected.QuotaRowID, 10), strconv.FormatInt(expected.ControlGeneration, 10), strconv.FormatInt(expected.SchemaVersion, 10)
+	}
+	formatLimit := func(value *float64) string {
+		if value == nil {
+			return ""
+		}
+		return strconv.FormatFloat(*value, 'f', -1, 64)
+	}
+	formatTime := func(value *time.Time) string {
+		if value == nil {
+			return ""
+		}
+		return strconv.FormatInt(value.Unix(), 10)
+	}
+	return append(args, next.CacheInstance, strconv.FormatInt(next.Version, 10), strconv.FormatInt(next.QuotaRowID, 10), strconv.FormatInt(next.ControlGeneration, 10), strconv.FormatInt(next.SchemaVersion, 10),
+		strconv.FormatFloat(next.DailyUsageUSD, 'f', -1, 64), strconv.FormatFloat(next.WeeklyUsageUSD, 'f', -1, 64), strconv.FormatFloat(next.MonthlyUsageUSD, 'f', -1, 64),
+		formatLimit(next.DailyLimitUSD), formatLimit(next.WeeklyLimitUSD), formatLimit(next.MonthlyLimitUSD),
+		formatTime(next.DailyWindowStart), formatTime(next.WeeklyWindowStart), formatTime(next.MonthlyWindowStart))
 }
 
 func (c *billingCache) SetUserPlatformQuotaCache(ctx context.Context, userID int64, platform string, entry *service.UserPlatformQuotaCacheEntry, ttl time.Duration) error {
-	if entry == nil {
-		return nil
+	if err := c.quotaCacheAccessError(); err != nil {
+		return err
 	}
-	key := userPlatformQuotaCacheKey(userID, platform)
-	pipe := c.rdb.TxPipeline()
+	if err := validateUserPlatformQuotaCacheEntry(entry, false); err != nil {
+		return err
+	}
+	seconds, err := userPlatformQuotaCacheTTL(ttl)
+	if err != nil {
+		return err
+	}
+	next := *entry
+	next.CacheInstance, err = newUserPlatformQuotaCacheInstance()
+	if err != nil {
+		return err
+	}
+	return c.rdb.Eval(ctx, compareAndSetUserPlatformQuotaCacheScript, []string{userPlatformQuotaCacheKey(userID, platform)}, quotaCacheWriteArgs("set", nil, &next, seconds)...).Err()
+}
 
-	// 浮点可空字段：nil → 空字符串（读取时 parseFloatPtr 返回 nil，表示无限额）
-	fmtFloatPtr := func(p *float64) string {
-		if p == nil {
-			return ""
-		}
-		return strconv.FormatFloat(*p, 'f', -1, 64)
+// CompareAndSetUserPlatformQuotaCache is an optional narrow admission boundary.
+// A new cache instance fences delete/recreate and raw SET ABA even at version 0.
+func (c *billingCache) CompareAndSetUserPlatformQuotaCache(ctx context.Context, userID int64, platform string, expected, next *service.UserPlatformQuotaCacheEntry, ttl time.Duration) (bool, error) {
+	if err := c.quotaCacheAccessError(); err != nil {
+		return false, err
 	}
-	// time.Time 可空字段：nil → 空字符串；有值 → unix 秒
-	fmtTimePtr := func(p *time.Time) string {
-		if p == nil {
-			return ""
-		}
-		return strconv.FormatInt(p.Unix(), 10)
+	if err := validateUserPlatformQuotaCacheEntry(next, true); err != nil {
+		return false, err
 	}
-
-	pipe.HSet(ctx, key,
-		"daily_usage", entry.DailyUsageUSD,
-		"weekly_usage", entry.WeeklyUsageUSD,
-		"monthly_usage", entry.MonthlyUsageUSD,
-		"version", entry.Version,
-		"schema_version", entry.SchemaVersion,
-		"daily_limit", fmtFloatPtr(entry.DailyLimitUSD),
-		"weekly_limit", fmtFloatPtr(entry.WeeklyLimitUSD),
-		"monthly_limit", fmtFloatPtr(entry.MonthlyLimitUSD),
-		"daily_window_start", fmtTimePtr(entry.DailyWindowStart),
-		"weekly_window_start", fmtTimePtr(entry.WeeklyWindowStart),
-		"monthly_window_start", fmtTimePtr(entry.MonthlyWindowStart),
-	)
-	pipe.Expire(ctx, key, ttl)
-	_, err := pipe.Exec(ctx)
-	return err
+	seconds, err := userPlatformQuotaCacheTTL(ttl)
+	if err != nil {
+		return false, err
+	}
+	mode := "nx"
+	version := int64(0)
+	if expected != nil {
+		if err := validateUserPlatformQuotaCacheEntry(expected, true); err != nil {
+			return false, err
+		}
+		if !validUserPlatformQuotaCacheInstance(expected.CacheInstance) || expected.Version == math.MaxInt64 {
+			return false, invalidUserPlatformQuotaCache("ineligible CAS revision/instance")
+		}
+		if expected.QuotaRowID != next.QuotaRowID || expected.ControlGeneration != next.ControlGeneration || expected.SchemaVersion != next.SchemaVersion {
+			return false, invalidUserPlatformQuotaCache("CAS identity transition")
+		}
+		mode, version = "cas", expected.Version+1
+	}
+	replacement := *next
+	replacement.Version = version
+	replacement.CacheInstance, err = newUserPlatformQuotaCacheInstance()
+	if err != nil {
+		return false, err
+	}
+	result, err := c.rdb.Eval(ctx, compareAndSetUserPlatformQuotaCacheScript, []string{userPlatformQuotaCacheKey(userID, platform)}, quotaCacheWriteArgs(mode, expected, &replacement, seconds)...).Int64()
+	if err != nil {
+		return false, err
+	}
+	return result == 1, nil
 }
 
 func (c *billingCache) DeleteUserPlatformQuotaCache(ctx context.Context, userID int64, platform string) error {
+	if err := c.quotaCacheAccessError(); err != nil {
+		return err
+	}
 	return c.rdb.Del(ctx, userPlatformQuotaCacheKey(userID, platform)).Err()
 }
-
-// updateUserPlatformQuotaUsageScript 缓存累加：EXISTS + schema_version 双重守卫。
-// 旧版 entry（schema_version != ARGV[3]，包括缺字段的 0 值）不参与累加，由上层走 DB fallback 后
-// SetCache 重建为新版 entry —— 若此处仍累加，上层覆盖时会丢失这部分增量，导致 Redis usage 比真实偏小。
-// key 不存在同样跳过（由下次 SetCache 重建）。
-// KEYS[1] = hash key
-// KEYS[2] = 脏集 key（dirty set）
-// ARGV[1] = cost (string float)
-// ARGV[2] = ttl seconds
-// ARGV[3] = expected schema_version (Go 侧 UserPlatformQuotaCacheSchemaV1)
-// ARGV[4] = dirty set member（空串则不 SADD）
-// ARGV[5] = 脏集兜底 TTL 秒
-const updateUserPlatformQuotaUsageScript = `
-if redis.call("EXISTS", KEYS[1]) == 0 then
-    return 0
-end
-local ver = redis.call("HGET", KEYS[1], "schema_version")
-if ver == false or tonumber(ver) ~= tonumber(ARGV[3]) then
-    return 0
-end
-redis.call("HINCRBYFLOAT", KEYS[1], "daily_usage", ARGV[1])
-redis.call("HINCRBYFLOAT", KEYS[1], "weekly_usage", ARGV[1])
-redis.call("HINCRBYFLOAT", KEYS[1], "monthly_usage", ARGV[1])
-redis.call("HINCRBY", KEYS[1], "version", 1)
-redis.call("EXPIRE", KEYS[1], ARGV[2])
-if ARGV[4] ~= "" then
-    redis.call("SADD", KEYS[2], ARGV[4])
-    redis.call("EXPIRE", KEYS[2], ARGV[5])
-end
-return 1
-`
 
 // userPlatformQuotaDirtySetKey 返回脏集（dirty set）的 Redis key。
 // 使用与 userPlatformQuotaCacheKey 相同的前缀 "billing:"。
@@ -537,25 +708,6 @@ const userPlatformQuotaDirtyTTLSeconds = 86400
 // userPlatformQuotaDirtyMember 构造脏集成员字符串 "userID:platform"。
 func userPlatformQuotaDirtyMember(userID int64, platform string) string {
 	return strconv.FormatInt(userID, 10) + ":" + platform
-}
-
-func (c *billingCache) IncrUserPlatformQuotaUsageCache(ctx context.Context, userID int64, platform string, cost float64, ttl time.Duration, markDirty bool) error {
-	member := ""
-	if markDirty {
-		member = userPlatformQuotaDirtyMember(userID, platform)
-	}
-	_, err := c.rdb.Eval(ctx, updateUserPlatformQuotaUsageScript,
-		[]string{userPlatformQuotaCacheKey(userID, platform), userPlatformQuotaDirtySetKey()},
-		strconv.FormatFloat(cost, 'f', -1, 64),
-		int(ttl.Seconds()),
-		service.UserPlatformQuotaCacheSchemaV1,
-		member,
-		userPlatformQuotaDirtyTTLSeconds,
-	).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return err
-	}
-	return nil
 }
 
 // parseUserPlatformQuotaDirtyMember 将脏集成员字符串 "userID:platform" 解析为
@@ -575,6 +727,9 @@ func parseUserPlatformQuotaDirtyMember(m string) (service.UserPlatformQuotaKey, 
 // PopDirtyUserPlatformQuotaKeys 从脏集随机弹出最多 n 个 key。
 // 脏集为空时返回 (nil, nil)。
 func (c *billingCache) PopDirtyUserPlatformQuotaKeys(ctx context.Context, n int) ([]service.UserPlatformQuotaKey, error) {
+	if err := c.quotaCacheAccessError(); err != nil {
+		return nil, err
+	}
 	members, err := c.rdb.SPopN(ctx, userPlatformQuotaDirtySetKey(), int64(n)).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -598,6 +753,9 @@ func (c *billingCache) PopDirtyUserPlatformQuotaKeys(ctx context.Context, n int)
 // 通过 pipeline 同时执行 SAdd + Expire，确保 Readd 后脏集具有兜底 TTL。
 // 空切片时直接返回 nil。
 func (c *billingCache) ReaddDirtyUserPlatformQuotaKeys(ctx context.Context, keys []service.UserPlatformQuotaKey) error {
+	if err := c.quotaCacheAccessError(); err != nil {
+		return err
+	}
 	if len(keys) == 0 {
 		return nil
 	}
@@ -614,8 +772,11 @@ func (c *billingCache) ReaddDirtyUserPlatformQuotaKeys(ctx context.Context, keys
 }
 
 // BatchGetUserPlatformQuotaCache 通过 Pipeline 批量 HGETALL 获取多个 user×platform 的
-// quota cache。返回切片与 keys 顺序、长度对齐；MISS 或解析失败位置返回 nil。
+// quota cache。返回切片与 keys 顺序、长度对齐；MISS 返回 nil，坏状态整批返回 error。
 func (c *billingCache) BatchGetUserPlatformQuotaCache(ctx context.Context, keys []service.UserPlatformQuotaKey) ([]*service.UserPlatformQuotaCacheEntry, error) {
+	if err := c.quotaCacheAccessError(); err != nil {
+		return nil, err
+	}
 	if len(keys) == 0 {
 		return nil, nil
 	}
@@ -631,13 +792,12 @@ func (c *billingCache) BatchGetUserPlatformQuotaCache(ctx context.Context, keys 
 	for i, cmd := range cmds {
 		m, err := cmd.Result()
 		if err != nil {
-			if !errors.Is(err, redis.Nil) {
-				log.Printf("billing_cache: BatchGet HGETALL cmd[%d] failed: %v (skip, self-heal)", i, err)
-			}
-			// 单个命令失败 → 对应位置 nil，继续
-			continue
+			return nil, err
 		}
-		results[i] = parseUserPlatformQuotaHash(m)
+		results[i], err = parseUserPlatformQuotaHash(m)
+		if err != nil {
+			return nil, fmt.Errorf("quota cache batch index %d: %w", i, err)
+		}
 	}
 	return results, nil
 }

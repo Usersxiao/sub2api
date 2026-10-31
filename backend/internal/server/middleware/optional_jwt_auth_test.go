@@ -10,6 +10,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -25,6 +26,7 @@ func newOptionalJWTTestEnv(users map[int64]*service.User) (*gin.Engine, *service
 
 	userRepo := &stubJWTUserRepo{users: users}
 	authSvc := service.NewAuthService(nil, userRepo, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	authSvc.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 	userSvc := service.NewUserService(userRepo, nil, nil, nil)
 	mw := NewOptionalJWTAuthMiddleware(authSvc, userSvc, nil, nil)
 

@@ -54,6 +54,14 @@ func (p *PanelRateLimiter) Global() gin.HandlerFunc {
 	return p.userScoped("global", func(s service.PanelRateLimitSettings) int { return s.UserRPM })
 }
 
+// ClientSession bounds client session proofs independently of panel operations.
+// Local capability requests recheck the remote session; counting each proof
+// against the panel budget can otherwise retire a healthy client mid-turn.
+// The configured user RPM, identity isolation and exemption policy still apply.
+func (p *PanelRateLimiter) ClientSession() gin.HandlerFunc {
+	return p.userScoped("client-session", func(s service.PanelRateLimitSettings) int { return s.UserRPM })
+}
+
 // Heavy 重查询接口的按用户限流（严格档，覆盖 usage/dashboard 等聚合统计端点）。
 // 与 Global 叠加计数：一次重查询同时消耗两档额度。
 func (p *PanelRateLimiter) Heavy() gin.HandlerFunc {

@@ -250,7 +250,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 
 	// 1. 首先获取用户并发槽位
-	userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted)
+	userReleaseFunc, err := acquireClientInvocationAwareUserSlot(c, apiKey, func() (func(), error) {
+		return h.concurrencyHelper.AcquireUserSlotWithWait(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted)
+	})
 	if err != nil {
 		reqLog.Warn("gateway.user_slot_acquire_failed", zap.Error(err))
 		h.handleConcurrencyError(c, err, "user", streamStarted)
@@ -348,7 +350,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		c.Request = c.Request.WithContext(h.gatewayService.WithSingleAntigravityAccountGroupProbe(c.Request.Context(), apiKey.GroupID))
 
 		for {
-			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
+			selection, leased, err := clientInvocationSelectionFromContext(c, "messages", service.PlatformGemini, apiKey.GroupID, reqModel, fs.FailedAccountIDs)
+			if !leased {
+				selection, err = h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
+			}
 			if err != nil {
 				if failoverClientGone(c) {
 					reqLog.Info("gateway.account_select_aborted_client_disconnected", zap.Error(err))
@@ -679,7 +684,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				zap.Bool("has_bound_session", hasBoundSession),
 				zap.Int("failed_account_count", len(fs.FailedAccountIDs)),
 			)
-			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, subject.UserID)
+			selection, leased, err := clientInvocationSelectionFromContext(c, "messages", platform, currentAPIKey.GroupID, reqModel, fs.FailedAccountIDs)
+			if !leased {
+				selection, err = h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, subject.UserID)
+			}
 			if err != nil {
 				if failoverClientGone(c) {
 					reqLog.Info("gateway.account_select_aborted_client_disconnected", zap.Error(err))
@@ -2562,6 +2570,9 @@ func (h *GatewayHandler) maybeLogCompatibilityFallbackMetrics(reqLog *zap.Logger
 }
 
 func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task service.UsageRecordTask) {
+	if submitRequiredUsageRecordTask(parent, task) {
+		return
+	}
 	if task == nil {
 		return
 	}
@@ -2595,6 +2606,9 @@ func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task serv
 
 // submitMandatoryUsageRecordTask never silently drops billing work on pool overflow.
 func (h *GatewayHandler) submitMandatoryUsageRecordTask(parent context.Context, task service.UsageRecordTask) {
+	if submitRequiredUsageRecordTask(parent, task) {
+		return
+	}
 	if task == nil {
 		return
 	}

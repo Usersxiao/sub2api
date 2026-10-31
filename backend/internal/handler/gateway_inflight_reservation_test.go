@@ -81,6 +81,16 @@ func TestReserveInflightBalance_UnpricedFailOpenByDefaultFailClosedOptIn(t *test
 	require.ErrorIs(t, err, service.ErrInsufficientBalance)
 }
 
+// noConfiguredPlatformQuota models a successful database read with no quota
+// row. A missing repository means an unavailable observation, not no limit.
+type noConfiguredPlatformQuota struct {
+	service.UserPlatformQuotaRepository
+}
+
+func (noConfiguredPlatformQuota) GetByUserPlatform(context.Context, int64, string) (*service.UserPlatformQuotaRecord, error) {
+	return nil, nil
+}
+
 // handlerInflightCache 内存版余额缓存 + 在途预留（语义同 Redis Lua）。
 type handlerInflightCache struct {
 	service.BillingCache
@@ -168,7 +178,7 @@ func TestWebSearch_RejectsWhenInflightExceedsBalance(t *testing.T) {
 	cache := newHandlerInflightCache(1.5)
 	cfg := &config.Config{}
 	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: 60}
-	billingCache := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
+	billingCache := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, noConfiguredPlatformQuota{})
 	t.Cleanup(billingCache.Stop)
 	billing := service.NewBillingService(cfg, nil)
 	gw := service.NewGatewayService(

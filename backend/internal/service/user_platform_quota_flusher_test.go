@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -56,9 +57,11 @@ func (m *mockQuotaDirtyCache) BatchGetUserPlatformQuotaCache(_ context.Context, 
 type mockQuotaSnapshotWriter struct {
 	receivedSnaps []UserPlatformQuotaSnapshot
 	returnErr     error
+	writeCalls    int
 }
 
 func (m *mockQuotaSnapshotWriter) BatchSnapshotUsage(_ context.Context, snaps []UserPlatformQuotaSnapshot, _ time.Time) error {
+	m.writeCalls++
 	m.receivedSnaps = append(m.receivedSnaps, snaps...)
 	return m.returnErr
 }
@@ -72,12 +75,42 @@ func flusherPtrTime(t time.Time) *time.Time { return &t }
 func makeEntry(daily, weekly, monthly float64) *UserPlatformQuotaCacheEntry {
 	now := time.Now().UTC()
 	return &UserPlatformQuotaCacheEntry{
+		QuotaRowID:         100,
+		ControlGeneration:  1,
+		SchemaVersion:      UserPlatformQuotaCacheSchemaV1,
 		DailyUsageUSD:      daily,
 		WeeklyUsageUSD:     weekly,
 		MonthlyUsageUSD:    monthly,
 		DailyWindowStart:   flusherPtrTime(now),
 		WeeklyWindowStart:  flusherPtrTime(now),
 		MonthlyWindowStart: flusherPtrTime(now),
+	}
+}
+
+func TestUserPlatformQuotaSnapshotTokensArePrivate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value any
+	}{
+		{name: "record", value: UserPlatformQuotaRecord{QuotaRowID: 101, ControlGeneration: 7}},
+		{name: "snapshot", value: UserPlatformQuotaSnapshot{QuotaRowID: 101, ControlGeneration: 7}},
+		{name: "cache entry", value: UserPlatformQuotaCacheEntry{QuotaRowID: 101, ControlGeneration: 7, CacheInstance: "private-instance"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"QuotaRowID", "ControlGeneration", "CacheInstance"} {
+				if _, exposed := payload[key]; exposed {
+					t.Fatalf("private snapshot token %s exposed in %s", key, encoded)
+				}
+			}
+		})
 	}
 }
 
@@ -113,6 +146,10 @@ func TestFlusher_PopSnapshotUpsert(t *testing.T) {
 			makeEntry(4.0, 5.0, 6.0),
 		},
 	}
+	cache.getEntries[0].QuotaRowID = 101
+	cache.getEntries[0].ControlGeneration = 7
+	cache.getEntries[1].QuotaRowID = 202
+	cache.getEntries[1].ControlGeneration = 8
 	writer := &mockQuotaSnapshotWriter{}
 	f := newTestFlusher(cache, writer)
 
@@ -120,6 +157,12 @@ func TestFlusher_PopSnapshotUpsert(t *testing.T) {
 
 	if len(writer.receivedSnaps) != 2 {
 		t.Fatalf("expected 2 snaps, got %d", len(writer.receivedSnaps))
+	}
+	for i, snap := range writer.receivedSnaps {
+		entry := cache.getEntries[i]
+		if snap.QuotaRowID != entry.QuotaRowID || snap.ControlGeneration != entry.ControlGeneration {
+			t.Errorf("snap[%d] token = (%d,%d), want (%d,%d)", i, snap.QuotaRowID, snap.ControlGeneration, entry.QuotaRowID, entry.ControlGeneration)
+		}
 	}
 	if f.metrics.FlushBatchSizeTotal.Load() != 2 {
 		t.Errorf("FlushBatchSizeTotal = %d, want 2", f.metrics.FlushBatchSizeTotal.Load())
@@ -129,6 +172,74 @@ func TestFlusher_PopSnapshotUpsert(t *testing.T) {
 	}
 	if f.metrics.FlushErrorTotal.Load() != 0 {
 		t.Errorf("FlushErrorTotal = %d, want 0", f.metrics.FlushErrorTotal.Load())
+	}
+	if len(cache.readdCalled) != 0 {
+		t.Fatalf("successful writes, including DB fence no-ops, must not readd: %+v", cache.readdCalled)
+	}
+}
+
+func TestFlusher_UnstampedEntriesSkippedNoReadd(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rowID      int64
+		generation int64
+		schema     int64
+	}{
+		{name: "older V1 entry", rowID: 0, generation: 0, schema: UserPlatformQuotaCacheSchemaV1},
+		{name: "missing row identity", rowID: 0, generation: 1, schema: UserPlatformQuotaCacheSchemaV1},
+		{name: "missing generation", rowID: 100, generation: 0, schema: UserPlatformQuotaCacheSchemaV1},
+		{name: "negative row identity", rowID: -1, generation: 1, schema: UserPlatformQuotaCacheSchemaV1},
+		{name: "negative generation", rowID: 100, generation: -1, schema: UserPlatformQuotaCacheSchemaV1},
+		{name: "old schema with token", rowID: 100, generation: 1, schema: 0},
+		{name: "unknown schema with token", rowID: 100, generation: 1, schema: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := makeEntry(1, 2, 3)
+			entry.QuotaRowID = tc.rowID
+			entry.ControlGeneration = tc.generation
+			entry.SchemaVersion = tc.schema
+			cache := &mockQuotaDirtyCache{
+				popSequence: [][]UserPlatformQuotaKey{{{UserID: 1, Platform: "openai"}}},
+				getEntries:  []*UserPlatformQuotaCacheEntry{entry},
+			}
+			writer := &mockQuotaSnapshotWriter{}
+			f := newTestFlusher(cache, writer)
+
+			f.flush()
+
+			if writer.writeCalls != 0 || len(cache.readdCalled) != 0 {
+				t.Fatalf("unstamped entry: writer calls=%d readd calls=%d, want both 0", writer.writeCalls, len(cache.readdCalled))
+			}
+			if f.metrics.FlushErrorTotal.Load() != 0 {
+				t.Fatal("skipped entry is not a DB error")
+			}
+		})
+	}
+}
+
+func TestFlusher_DBErrorReaddsOnlyStampedSnapshotKeys(t *testing.T) {
+	valid := makeEntry(1, 2, 3)
+	legacy := makeEntry(4, 5, 6)
+	legacy.QuotaRowID = 0
+	legacy.ControlGeneration = 0
+	keys := []UserPlatformQuotaKey{
+		{UserID: 1, Platform: "openai"},
+		{UserID: 2, Platform: "openai"},
+	}
+	cache := &mockQuotaDirtyCache{
+		popSequence: [][]UserPlatformQuotaKey{keys},
+		getEntries:  []*UserPlatformQuotaCacheEntry{valid, legacy},
+	}
+	writer := &mockQuotaSnapshotWriter{returnErr: errors.New("database unavailable")}
+	f := newTestFlusher(cache, writer)
+
+	f.flush()
+
+	if len(writer.receivedSnaps) != 1 {
+		t.Fatalf("snapshot count = %d, want 1", len(writer.receivedSnaps))
+	}
+	if len(cache.readdCalled) != 1 || len(cache.readdCalled[0]) != 1 || cache.readdCalled[0][0] != keys[0] {
+		t.Fatalf("readd = %+v, want only stamped key %+v", cache.readdCalled, keys[0])
 	}
 }
 

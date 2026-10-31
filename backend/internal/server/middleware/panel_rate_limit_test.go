@@ -313,3 +313,53 @@ func TestIsPubliclyRoutableClientIP(t *testing.T) {
 	require.False(t, isPubliclyRoutableClientIP(""))
 	require.False(t, isPubliclyRoutableClientIP("not-an-ip"))
 }
+
+func TestPanelRateLimiterClientSessionSeparateBudget(t *testing.T) {
+	allower := &fakePanelAllower{}
+	p := &PanelRateLimiter{
+		limiter:        allower,
+		settingService: newPanelRateLimitTestService(t, `{"enabled":true,"user_rpm":2,"heavy_rpm":1,"exempt_admin":false,"public_ip_rpm":0}`),
+	}
+	identity := &panelTestIdentity{userID: 1, role: service.RoleUser}
+	panel := newPanelTestRouter(p.Global(), identity)
+	proof := newPanelTestRouter(p.ClientSession(), identity)
+	for i := 0; i < 2; i++ {
+		require.Equal(t, http.StatusOK, performPanelRequest(panel, "127.0.0.1:1000").Code)
+	}
+	require.Equal(t, http.StatusTooManyRequests, performPanelRequest(panel, "127.0.0.1:1000").Code)
+	// Exhausting panel calls leaves the authenticated proof budget usable.
+	for i := 0; i < 2; i++ {
+		require.Equal(t, http.StatusOK, performPanelRequest(proof, "127.0.0.1:1000").Code)
+	}
+	limited := performPanelRequest(proof, "127.0.0.1:1000")
+	require.Equal(t, http.StatusTooManyRequests, limited.Code)
+	require.NotEmpty(t, limited.Header().Get("Retry-After"))
+	require.Contains(t, limited.Body.String(), "RATE_LIMITED")
+	other := newPanelTestRouter(p.ClientSession(), &panelTestIdentity{userID: 2, role: service.RoleUser})
+	require.Equal(t, http.StatusOK, performPanelRequest(other, "127.0.0.1:1000").Code)
+	require.Equal(t, http.StatusTooManyRequests, performPanelRequest(panel, "127.0.0.1:1000").Code)
+	require.Equal(t, int64(3), allower.counts["panel:client-session:user:1"])
+	require.Equal(t, int64(1), allower.counts["panel:client-session:user:2"])
+	require.Equal(t, int64(4), allower.counts["panel:global:user:1"])
+}
+
+func TestPanelRateLimiterClientSessionHonorsPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		settings string
+		role     string
+		want     int
+	}{
+		{"user limited", `{"enabled":true,"user_rpm":1,"exempt_admin":true}`, service.RoleUser, http.StatusTooManyRequests},
+		{"admin exemption", `{"enabled":true,"user_rpm":1,"exempt_admin":true}`, service.RoleAdmin, http.StatusOK},
+		{"admin limited", `{"enabled":true,"user_rpm":1,"exempt_admin":false}`, service.RoleAdmin, http.StatusTooManyRequests},
+		{"disabled", `{"enabled":false,"user_rpm":1}`, service.RoleUser, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &PanelRateLimiter{limiter: &fakePanelAllower{}, settingService: newPanelRateLimitTestService(t, tc.settings)}
+			router := newPanelTestRouter(p.ClientSession(), &panelTestIdentity{userID: 1, role: tc.role})
+			require.Equal(t, http.StatusOK, performPanelRequest(router, "127.0.0.1:1000").Code)
+			require.Equal(t, tc.want, performPanelRequest(router, "127.0.0.1:1000").Code)
+		})
+	}
+}

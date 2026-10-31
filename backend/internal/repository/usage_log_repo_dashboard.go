@@ -152,7 +152,7 @@ func (r *usageLogRepository) fillDashboardEntityStats(ctx context.Context, stats
 			COUNT(*) as total_api_keys,
 			COUNT(CASE WHEN status = $1 THEN 1 END) as active_api_keys
 		FROM api_keys
-		WHERE deleted_at IS NULL
+		WHERE deleted_at IS NULL AND kind = 'api_key'
 	`
 	if err := scanSingleRow(
 		ctx,
@@ -386,7 +386,7 @@ func (r *usageLogRepository) GetUserDashboardStats(ctx context.Context, userID i
 	if err := scanSingleRow(
 		ctx,
 		r.sql,
-		"SELECT COUNT(*) FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL",
+		"SELECT COUNT(*) FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL AND kind = 'api_key'",
 		[]any{userID},
 		&stats.TotalAPIKeys,
 	); err != nil {
@@ -395,7 +395,7 @@ func (r *usageLogRepository) GetUserDashboardStats(ctx context.Context, userID i
 	if err := scanSingleRow(
 		ctx,
 		r.sql,
-		"SELECT COUNT(*) FROM api_keys WHERE user_id = $1 AND status = $2 AND deleted_at IS NULL",
+		"SELECT COUNT(*) FROM api_keys WHERE user_id = $1 AND status = $2 AND deleted_at IS NULL AND kind = 'api_key'",
 		[]any{userID, service.StatusActive},
 		&stats.ActiveAPIKeys,
 	); err != nil {

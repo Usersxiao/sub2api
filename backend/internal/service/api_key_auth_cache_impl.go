@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 24 // v24: group model_allowlist field (renamed from models_list_config, enforcing semantics)
+const apiKeyAuthSnapshotVersion = 25 // v25: distinguish bearer credentials from internal billing identities
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
@@ -328,15 +328,19 @@ func (s *APIKeyService) applyAuthCacheEntry(key string, entry *APIKeyAuthCacheEn
 	if entry.Snapshot.Version != apiKeyAuthSnapshotVersion {
 		return nil, false, nil
 	}
+	if entry.Snapshot.Kind != "" && entry.Snapshot.Kind != APIKeyKindCredential {
+		return nil, true, ErrAPIKeyNotFound
+	}
 	return s.snapshotToAPIKey(key, entry.Snapshot), true, nil
 }
 
 func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) *APIKeyAuthSnapshot {
-	if apiKey == nil || apiKey.User == nil {
+	if !apiKey.IsCredential() || apiKey.User == nil {
 		return nil
 	}
 	snapshot := &APIKeyAuthSnapshot{
 		Version:     apiKeyAuthSnapshotVersion,
+		Kind:        APIKeyKindCredential,
 		APIKeyID:    apiKey.ID,
 		UserID:      apiKey.UserID,
 		GroupID:     apiKey.GroupID,
@@ -446,6 +450,7 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 	}
 	apiKey := &APIKey{
 		ID:          snapshot.APIKeyID,
+		Kind:        APIKeyKindCredential,
 		UserID:      snapshot.UserID,
 		GroupID:     snapshot.GroupID,
 		Key:         key,

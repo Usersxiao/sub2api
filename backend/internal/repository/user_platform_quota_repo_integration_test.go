@@ -402,6 +402,12 @@ func TestBatchSnapshotUsage_OverwriteMultiKey(t *testing.T) {
 			MonthlyWindowStart: monthlyStart,
 		},
 	}
+	for i := range firstBatch {
+		control, err := repo.GetByUserPlatform(ctx, firstBatch[i].UserID, firstBatch[i].Platform)
+		require.NoError(t, err)
+		require.NotNil(t, control)
+		firstBatch[i].QuotaRowID, firstBatch[i].ControlGeneration = control.QuotaRowID, control.ControlGeneration
+	}
 	require.NoError(t, repo.BatchSnapshotUsage(ctx, firstBatch, now), "first batch upsert")
 
 	// 验证首批 daily 值
@@ -440,6 +446,12 @@ func TestBatchSnapshotUsage_OverwriteMultiKey(t *testing.T) {
 			WeeklyWindowStart:  weeklyStart,
 			MonthlyWindowStart: monthlyStart,
 		},
+	}
+	for i := range secondBatch {
+		control, err := repo.GetByUserPlatform(ctx, secondBatch[i].UserID, secondBatch[i].Platform)
+		require.NoError(t, err)
+		require.NotNil(t, control)
+		secondBatch[i].QuotaRowID, secondBatch[i].ControlGeneration = control.QuotaRowID, control.ControlGeneration
 	}
 	require.NoError(t, repo.BatchSnapshotUsage(ctx, secondBatch, now2), "second batch upsert")
 

@@ -11,11 +11,14 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/userplatformquota"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 // UserPlatformQuotaRecord 是 repository 层的传输结构体，
 // 与 ent.UserPlatformQuota 实体解耦，供业务层使用。
 type UserPlatformQuotaRecord struct {
+	QuotaRowID         int64 `json:"-"`
+	ControlGeneration  int64 `json:"-"`
 	UserID             int64
 	Platform           string
 	DailyLimitUSD      *float64
@@ -44,6 +47,8 @@ var ErrUserPlatformQuotaFKViolation = errors.New("user platform quota snapshot F
 // UserPlatformQuotaSnapshot 是 BatchSnapshotUsage 的输入结构体，
 // 表示 Redis 当前窗口快照（用于绝对值覆盖写入 DB）。
 type UserPlatformQuotaSnapshot struct {
+	QuotaRowID         int64 `json:"-"`
+	ControlGeneration  int64 `json:"-"`
 	UserID             int64
 	Platform           string
 	DailyUsageUSD      float64
@@ -68,18 +73,25 @@ type UserPlatformQuotaRepository interface {
 	ResetExpiredWindow(ctx context.Context, userID int64, platform string, window string, newStart time.Time) error
 	// UpsertForUser 全量替换该用户所有平台限额配置；三档全空的记录视为未配置（详见实现注释）。
 	UpsertForUser(ctx context.Context, userID int64, records []UserPlatformQuotaRecord) error
-	// BatchSnapshotUsage 把整批 usage 以绝对值覆盖写入既有活跃行(非累加)；行不存在或已软删的 (user,platform) 跳过。
+	// BatchSnapshotUsage 只覆盖 incarnation/control generation 匹配的活跃行；缺少或过期的 token 跳过。
 	// usage/window_start 直接取 Redis 当前窗口快照。整批共用 now 作 updated_at。要求 snapshots 内 (user,platform) 不重复。
 	BatchSnapshotUsage(ctx context.Context, snapshots []UserPlatformQuotaSnapshot, now time.Time) error
 }
 
 type userPlatformQuotaRepository struct {
-	client *dbent.Client
+	client                    *dbent.Client
+	writerAuthority           service.UserPlatformQuotaWriterAuthority
+	writerAuthorityConfigured bool
 }
 
 // NewUserPlatformQuotaRepository 创建 UserPlatformQuotaRepository 实现。
 func NewUserPlatformQuotaRepository(client *dbent.Client) UserPlatformQuotaRepository {
 	return &userPlatformQuotaRepository{client: client}
+}
+
+// Legacy construction never acquires today's authority implicitly.
+func NewUserPlatformQuotaRepositoryWithWriterAuthority(client *dbent.Client, authority service.UserPlatformQuotaWriterAuthority) UserPlatformQuotaRepository {
+	return &userPlatformQuotaRepository{client: client, writerAuthority: authority, writerAuthorityConfigured: true}
 }
 
 // BulkInsertInitial 用原生 SQL ON CONFLICT 实现幂等批量插入。
@@ -134,42 +146,47 @@ func (r *userPlatformQuotaRepository) BulkInsertInitial(ctx context.Context, rec
 	return err
 }
 
-// GetByUserPlatform 通过 ent 查询单条配额（排除软删除）。未找到返回 (nil, nil)。
+// Keep the token and values in one statement's snapshot. Ent does not own the
+// migration-only control generation column.
+const userPlatformQuotaRecordSelect = `SELECT id,control_generation,user_id,platform,
+	daily_limit_usd,weekly_limit_usd,monthly_limit_usd,daily_usage_usd,weekly_usage_usd,monthly_usage_usd,
+	daily_window_start,weekly_window_start,monthly_window_start FROM user_platform_quotas`
+
+// GetByUserPlatform 查询单条配额及其当前私有写入 token。未找到返回 (nil, nil)。
 func (r *userPlatformQuotaRepository) GetByUserPlatform(ctx context.Context, userID int64, platform string) (*UserPlatformQuotaRecord, error) {
 	client := clientFromContext(ctx, r.client)
-	entity, err := client.UserPlatformQuota.Query().
-		Where(
-			userplatformquota.UserIDEQ(userID),
-			userplatformquota.PlatformEQ(platform),
-			userplatformquota.DeletedAtIsNil(),
-		).
-		Only(ctx)
-	if dbent.IsNotFound(err) {
-		return nil, nil
-	}
+	rows, err := client.QueryContext(ctx, userPlatformQuotaRecordSelect+` WHERE user_id=$1 AND platform=$2 AND deleted_at IS NULL`, userID, platform)
 	if err != nil {
 		return nil, err
 	}
-	return entQuotaToRecord(entity), nil
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	rec, err := scanUserPlatformQuotaRecord(rows)
+	if err != nil {
+		return nil, err
+	}
+	return rec, rows.Err()
 }
 
 // ListByUser 查询用户的所有平台配额记录（排除软删除）。
 func (r *userPlatformQuotaRepository) ListByUser(ctx context.Context, userID int64) ([]UserPlatformQuotaRecord, error) {
 	client := clientFromContext(ctx, r.client)
-	rows, err := client.UserPlatformQuota.Query().
-		Where(
-			userplatformquota.UserIDEQ(userID),
-			userplatformquota.DeletedAtIsNil(),
-		).
-		All(ctx)
+	rows, err := client.QueryContext(ctx, userPlatformQuotaRecordSelect+` WHERE user_id=$1 AND deleted_at IS NULL ORDER BY platform`, userID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]UserPlatformQuotaRecord, 0, len(rows))
-	for _, e := range rows {
-		out = append(out, *entQuotaToRecord(e))
+	defer rows.Close()
+	out := make([]UserPlatformQuotaRecord, 0)
+	for rows.Next() {
+		rec, err := scanUserPlatformQuotaRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rec)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // IncrementUsageWithReset 原子累加 cost 到 (user, platform) 三个窗口的 *_usage_usd。
@@ -179,6 +196,9 @@ func (r *userPlatformQuotaRepository) ListByUser(ctx context.Context, userID int
 //   - 记录不存在：直接返回 nil，不建行。限额只存在于 user_platform_quotas 的行中，
 //     不存在的行等价于不限额，没有可累加的对象。
 func (r *userPlatformQuotaRepository) IncrementUsageWithReset(ctx context.Context, userID int64, platform string, cost float64, now time.Time) error {
+	if r.writerAuthorityConfigured {
+		return service.ErrUserPlatformQuotaWriterModeUnsupported
+	}
 	return r.withTx(ctx, func(txCtx context.Context, txClient *dbent.Client) error {
 		existing, err := txClient.UserPlatformQuota.Query().
 			Where(
@@ -226,31 +246,50 @@ func (r *userPlatformQuotaRepository) IncrementUsageWithReset(ctx context.Contex
 //
 // 未命中活跃记录时返回 ErrUserPlatformQuotaNotFound。
 func (r *userPlatformQuotaRepository) ResetExpiredWindow(ctx context.Context, userID int64, platform string, window string, newStart time.Time) error {
-	client := clientFromContext(ctx, r.client)
-	upd := client.UserPlatformQuota.Update().
-		Where(
-			userplatformquota.UserIDEQ(userID),
-			userplatformquota.PlatformEQ(platform),
-			userplatformquota.DeletedAtIsNil(),
-		)
-	switch window {
-	case "daily":
-		upd = upd.SetDailyUsageUsd(0).SetDailyWindowStart(newStart)
-	case "weekly":
-		upd = upd.SetWeeklyUsageUsd(0).SetWeeklyWindowStart(newStart)
-	case "monthly":
-		upd = upd.SetMonthlyUsageUsd(0).SetMonthlyWindowStart(newStart)
-	default:
+	if window != "daily" && window != "weekly" && window != "monthly" {
 		return fmt.Errorf("unknown window %q", window)
 	}
-	n, err := upd.Save(ctx)
-	if err != nil {
+	return r.withTx(ctx, func(txCtx context.Context, txClient *dbent.Client) error {
+		if r.writerAuthorityConfigured {
+			if err := lockUserPlatformQuotaWriterAuthority(txCtx, txClient, r.writerAuthority, quotaWriterActionAdminReset); err != nil {
+				return err
+			}
+		}
+		// All reset writers acquire the quota row before its private reset state.
+		// The two effects commit together; a missing state never clears usage.
+		existing, err := txClient.UserPlatformQuota.Query().Where(userplatformquota.UserIDEQ(userID),
+			userplatformquota.PlatformEQ(platform), userplatformquota.DeletedAtIsNil()).ForUpdate().Only(txCtx)
+		if dbent.IsNotFound(err) {
+			return ErrUserPlatformQuotaNotFound
+		}
+		if err != nil {
+			return err
+		}
+		column := window + "_reset_at" // window is the closed set validated above.
+		res, err := txClient.ExecContext(txCtx, `UPDATE user_platform_quota_client_resets SET `+column+
+			`=GREATEST(COALESCE(`+column+`,tracking_started_at),clock_timestamp()) WHERE quota_row_id=$1`, existing.ID)
+		if err != nil {
+			return err
+		}
+		count, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return service.ErrClientPlatformQuotaProjectionUnavailable
+		}
+		upd := existing.Update()
+		switch window {
+		case "daily":
+			upd = upd.SetDailyUsageUsd(0).SetDailyWindowStart(newStart)
+		case "weekly":
+			upd = upd.SetWeeklyUsageUsd(0).SetWeeklyWindowStart(newStart)
+		case "monthly":
+			upd = upd.SetMonthlyUsageUsd(0).SetMonthlyWindowStart(newStart)
+		}
+		_, err = upd.Save(txCtx)
 		return err
-	}
-	if n == 0 {
-		return ErrUserPlatformQuotaNotFound
-	}
-	return nil
+	})
 }
 
 // withTx 在事务中执行 fn，若 ctx 中已有事务则复用。
@@ -276,22 +315,15 @@ func (r *userPlatformQuotaRepository) withTx(ctx context.Context, fn func(txCtx 
 	return nil
 }
 
-// entQuotaToRecord 将 ent entity 映射为 repository record。
-// 注意 ent 生成字段名为 DailyLimitUsd（非 DailyLimitUSD）。
-func entQuotaToRecord(e *dbent.UserPlatformQuota) *UserPlatformQuotaRecord {
-	return &UserPlatformQuotaRecord{
-		UserID:             e.UserID,
-		Platform:           e.Platform,
-		DailyLimitUSD:      e.DailyLimitUsd,
-		WeeklyLimitUSD:     e.WeeklyLimitUsd,
-		MonthlyLimitUSD:    e.MonthlyLimitUsd,
-		DailyUsageUSD:      e.DailyUsageUsd,
-		WeeklyUsageUSD:     e.WeeklyUsageUsd,
-		MonthlyUsageUSD:    e.MonthlyUsageUsd,
-		DailyWindowStart:   e.DailyWindowStart,
-		WeeklyWindowStart:  e.WeeklyWindowStart,
-		MonthlyWindowStart: e.MonthlyWindowStart,
+func scanUserPlatformQuotaRecord(row interface{ Scan(...any) error }) (*UserPlatformQuotaRecord, error) {
+	rec := new(UserPlatformQuotaRecord)
+	if err := row.Scan(&rec.QuotaRowID, &rec.ControlGeneration, &rec.UserID, &rec.Platform,
+		&rec.DailyLimitUSD, &rec.WeeklyLimitUSD, &rec.MonthlyLimitUSD,
+		&rec.DailyUsageUSD, &rec.WeeklyUsageUSD, &rec.MonthlyUsageUSD,
+		&rec.DailyWindowStart, &rec.WeeklyWindowStart, &rec.MonthlyWindowStart); err != nil {
+		return nil, err
 	}
+	return rec, nil
 }
 
 // maybeReset 判断是否需要重置窗口用量：
@@ -424,22 +456,34 @@ func insertLimitsRow(ctx context.Context, client *dbent.Client, userID int64, re
 	return nil
 }
 
-// batchRows 是 BatchSnapshotUsage 每批最大行数（8 参/行 × 6000 + 1 ≈ 48001 参,低于 Postgres 65535 上限）。
+// batchRows 是 BatchSnapshotUsage 每批最大行数（10 参/行 × 6000 + 1 = 60001 参）。
 const batchRows = 6000
 
 // BatchSnapshotUsage 用一条多行 UPDATE ... FROM (VALUES ...) 把整批 usage 以绝对值覆盖写入既有活跃行（非累加）。
-// 每批最多 batchRows 行；$1=now 共用；每行 8 个 per-row 参（user_id, platform, 3×usage, 3×window_start）。
-// 只命中 deleted_at IS NULL 的既有行：行不存在或已软删的 (user, platform) 直接跳过，不建行。
+// 每批最多 batchRows 行；$1=now 共用；每行 10 个 per-row 参，包含私有 incarnation/control token。
+// 只命中同 q.id、user/platform 和 generation 的活跃行；缺 token 或过期 token 不建行、不覆盖。
 //
 // 注意:snapshots 超过 batchRows 会分多条 SQL 执行且【非单事务】——若某子批失败,
 // 先前子批已写入无法回滚。调用方(flusher)应保证单次 batchSize ≤ batchRows
 // (默认 flush_batch_size=1000 < 6000,安全)。
-// 另注:启用 flusher 后,本绝对值覆盖与 admin 直写 DB(ResetExpiredWindow/UpsertForUser)存在覆盖竞态,
-// 详见 service/user_platform_quota_flusher.go 中 flushOneBatch 的"已知竞态"注释。
+// 此条件关闭管理 reset/limits/scope 变更和删建后的迟到快照；不认证同代快照的顺序、
+// Redis 刷新完整性、旧 binary writer 或 legacy/journal 的统一基线。
 func (r *userPlatformQuotaRepository) BatchSnapshotUsage(ctx context.Context, snapshots []UserPlatformQuotaSnapshot, now time.Time) error {
+	// This domain has no certified cache baseline or cross-mode handoff. Never
+	// stamp current authority onto a historical Redis absolute observation.
+	if r.writerAuthorityConfigured {
+		return service.ErrUserPlatformQuotaWriterModeUnsupported
+	}
 	if len(snapshots) == 0 {
 		return nil
 	}
+	valid := make([]UserPlatformQuotaSnapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.QuotaRowID > 0 && snapshot.ControlGeneration > 0 {
+			valid = append(valid, snapshot)
+		}
+	}
+	snapshots = valid
 
 	client := clientFromContext(ctx, r.client)
 
@@ -462,7 +506,7 @@ func (r *userPlatformQuotaRepository) BatchSnapshotUsage(ctx context.Context, sn
 				"  updated_at           = $1" +
 				" FROM (VALUES ")
 
-		// $1 = now（共用）；每行 8 个 per-row 参，从 $2 起连续编号。
+		// $1 = now（共用）；每行 10 个 per-row 参，从 $2 起连续编号。
 		// VALUES 里的占位符显式转型，避免 Postgres 对多行 VALUES 推断不出参数类型。
 		args := []any{now}
 		for i, s := range batch {
@@ -470,19 +514,21 @@ func (r *userPlatformQuotaRepository) BatchSnapshotUsage(ctx context.Context, sn
 				_, _ = sb.WriteString(",")
 			}
 			b := len(args) // 当前 per-row 第一个参数的 0-based 索引，实际占位符 = b+1
-			fmt.Fprintf(&sb, "($%d::bigint,$%d::varchar,$%d::numeric,$%d::numeric,$%d::numeric,$%d::timestamptz,$%d::timestamptz,$%d::timestamptz)",
-				b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8)
+			fmt.Fprintf(&sb, "($%d::bigint,$%d::varchar,$%d::numeric,$%d::numeric,$%d::numeric,$%d::timestamptz,$%d::timestamptz,$%d::timestamptz,$%d::bigint,$%d::bigint)",
+				b+1, b+2, b+3, b+4, b+5, b+6, b+7, b+8, b+9, b+10)
 			args = append(args,
 				s.UserID, s.Platform,
 				s.DailyUsageUSD, s.WeeklyUsageUSD, s.MonthlyUsageUSD,
 				s.DailyWindowStart, s.WeeklyWindowStart, s.MonthlyWindowStart,
+				s.QuotaRowID, s.ControlGeneration,
 			)
 		}
 
 		_, _ = sb.WriteString(
 			") AS v(user_id, platform, daily_usage_usd, weekly_usage_usd, monthly_usage_usd," +
-				" daily_window_start, weekly_window_start, monthly_window_start)" +
-				" WHERE q.user_id = v.user_id AND q.platform = v.platform AND q.deleted_at IS NULL")
+				" daily_window_start, weekly_window_start, monthly_window_start, quota_row_id, control_generation)" +
+				" WHERE q.user_id = v.user_id AND q.platform = v.platform AND q.deleted_at IS NULL" +
+				" AND q.id = v.quota_row_id AND q.control_generation = v.control_generation")
 
 		if _, err := client.ExecContext(ctx, sb.String(), args...); err != nil {
 			return err

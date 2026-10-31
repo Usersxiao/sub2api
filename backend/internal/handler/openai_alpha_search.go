@@ -110,7 +110,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	}
 
 	// 余额模式在途预留（与计费同口径估算；计费任务扣减余额缓存后才释放）。
-	inflightDone, inflightErr := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, service.InflightEstimateRequest{Model: requestedModel, BodyBytes: len(body), MaxTokens: requestMaxOutputTokens(body), Kind: service.InflightEstimateToken, SearchCalls: 1})
+	inflightDone, inflightErr := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, alphaSearchInflightEstimate(c, requestedModel, body))
 	if inflightErr != nil {
 		status, code, message, retryAfter := billingErrorDetails(inflightErr)
 		if retryAfter > 0 {
@@ -137,20 +137,24 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	c.Request = c.Request.WithContext(asPricingCtx)
 
 	for {
-		selection, _, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
-			c.Request.Context(),
-			apiKey.GroupID,
-			"",
-			sessionHash,
-			requestedModel,
-			failedAccountIDs,
-			service.OpenAIUpstreamTransportHTTPSSE,
-			service.OpenAIEndpointCapabilityAlphaSearch,
-			false,
-			false,
-			false,
-			service.PlatformOpenAI,
-		)
+		selection, leased, err := clientInvocationSelectionFromContext(c, service.ClientInvocationSearchProtocol, service.PlatformOpenAI, apiKey.GroupID, requestedModel, failedAccountIDs)
+		if !leased {
+			selection, _, err = h.gatewayService.SelectAccountWithSchedulerForCapability(
+				c.Request.Context(),
+				apiKey.GroupID,
+				"",
+				sessionHash,
+				requestedModel,
+				failedAccountIDs,
+				service.OpenAIUpstreamTransportHTTPSSE,
+				service.OpenAIEndpointCapabilityAlphaSearch,
+				false,
+				false,
+				false,
+				service.PlatformOpenAI,
+			)
+		}
+
 		if err != nil || selection == nil || selection.Account == nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai_alpha_search.account_select_aborted_client_disconnected", zap.Error(err))
@@ -206,6 +210,12 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 			return
 		}
 
+		if service.ClientInvocationProviderPayloadAuthorizationRequired(c.Request.Context()) {
+			if c.Writer.Size() == writerSizeBeforeForward {
+				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Search outcome is unconfirmed")
+			}
+			return
+		}
 		var failoverErr *service.UpstreamFailoverError
 		if !errors.As(err, &failoverErr) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, requestedModel, false, result), false, nil, err)
@@ -322,4 +332,11 @@ func (h *OpenAIGatewayHandler) recordAlphaSearchUsage(
 			).Error("openai_alpha_search.record_usage_failed", zap.Error(err))
 		}
 	})
+}
+
+func alphaSearchInflightEstimate(c *gin.Context, model string, body []byte) service.InflightEstimateRequest {
+	if c != nil && service.ClientInvocationProviderPayloadAuthorizationRequired(c.Request.Context()) {
+		return service.InflightEstimateRequest{Model: model, Kind: service.InflightEstimateWebSearch, Units: 1}
+	}
+	return service.InflightEstimateRequest{Model: model, BodyBytes: len(body), MaxTokens: requestMaxOutputTokens(body), Kind: service.InflightEstimateToken, SearchCalls: 1}
 }

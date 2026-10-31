@@ -365,6 +365,8 @@ const (
 	InflightEstimateVideo
 	// InflightEstimateAudio 语音（tts/stt/realtime）：按 AudioMode/AudioUnits 计。
 	InflightEstimateAudio
+	// AlphaSearch uses only the group web-search price and base multiplier.
+	InflightEstimateWebSearch
 )
 
 // InflightEstimateRequest 单请求估算输入。
@@ -488,7 +490,7 @@ func inflightBillingModelCandidates(ctx context.Context, deps inflightEstimateDe
 	return primary, fallbacks, upstreamInput
 }
 
-func (d inflightEstimateDeps) rates(ctx context.Context, apiKey *APIKey) (text, image float64) {
+func (d inflightEstimateDeps) baseRate(ctx context.Context, apiKey *APIKey) float64 {
 	rate := 1.0
 	if d.cfg != nil && d.cfg.Default.RateMultiplier > 0 {
 		rate = d.cfg.Default.RateMultiplier
@@ -499,7 +501,11 @@ func (d inflightEstimateDeps) rates(ctx context.Context, apiKey *APIKey) (text, 
 			rate = d.userGroupRate(ctx, apiKey.User.ID, *apiKey.GroupID, rate)
 		}
 	}
-	return computePeakAwareMultipliers(apiKey, rate, timezone.Now())
+	return rate
+}
+
+func (d inflightEstimateDeps) rates(ctx context.Context, apiKey *APIKey) (text, image float64) {
+	return computePeakAwareMultipliers(apiKey, d.baseRate(ctx, apiKey), timezone.Now())
 }
 
 func tokenCounts(cfg config.InflightReservationConfig, bodyBytes, maxTokens int) (int, int) {
@@ -642,6 +648,18 @@ func (d inflightEstimateDeps) estimate(ctx context.Context, apiKey *APIKey, req 
 	if req.Model == "" || (req.Kind == InflightEstimateAudio && req.AudioUnits <= 0) {
 		// 非计量请求（媒体状态查询、custom-voices 等）：无需预留，也不算「无法定价」。
 		return 0, true
+	}
+	if req.Kind == InflightEstimateWebSearch {
+		if req.Units != 1 || d.billing == nil {
+			return 0, false
+		}
+		// Web search settlement uses the base rate, excluding peak/channel/token prices.
+		rate := d.baseRate(ctx, apiKey)
+		cost := d.billing.CalculateWebSearchCost(1, webSearchPricePerCallFromAPIKey(apiKey), rate)
+		if cost == nil || cost.ActualCost < 0 || math.IsNaN(cost.ActualCost) || math.IsInf(cost.ActualCost, 0) {
+			return 0, false
+		}
+		return cost.ActualCost, true
 	}
 	textRate, imageRate := d.rates(ctx, apiKey)
 	if textRate <= 0 && imageRate <= 0 {

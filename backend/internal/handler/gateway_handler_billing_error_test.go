@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -42,10 +44,32 @@ func TestBillingErrorDetails_APIKeyRateLimitStillMaps(t *testing.T) {
 }
 
 func TestBillingErrorDetails_BillingServiceUnavailableMapsTo503(t *testing.T) {
-	status, code, _, retryAfter := billingErrorDetails(service.ErrBillingServiceUnavailable)
-	require.Equal(t, http.StatusServiceUnavailable, status)
-	require.Equal(t, "billing_service_error", code)
-	require.Equal(t, 0, retryAfter, "non-RPM errors should not set Retry-After")
+	const privateCause = "quota-db-credential=private-test-value"
+	quotaErr := service.ErrUserPlatformDailyQuotaExhausted.WithMetadata(map[string]string{
+		"window_resets_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	})
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"plain", service.ErrBillingServiceUnavailable},
+		{"private cause", service.ErrBillingServiceUnavailable.WithCause(errors.New(privateCause))},
+		{"cancelled observation", service.ErrBillingServiceUnavailable.WithCause(context.Canceled)},
+		{"wrapped observation", fmt.Errorf("quota observation: %w", service.ErrBillingServiceUnavailable.WithCause(errors.New(privateCause)))},
+		{"quota error in cause", service.ErrBillingServiceUnavailable.WithCause(errors.Join(quotaErr, errors.New(privateCause)))},
+		{"joined quota error", errors.Join(service.ErrBillingServiceUnavailable.WithCause(errors.New(privateCause)), quotaErr)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code, message, retryAfter := billingErrorDetails(tc.err)
+			require.Equal(t, http.StatusServiceUnavailable, status)
+			require.Equal(t, "billing_service_error", code)
+			require.Equal(t, service.ErrBillingServiceUnavailable.Message, message)
+			require.NotContains(t, message, privateCause)
+			require.NotContains(t, message, "window_resets_at")
+			require.Zero(t, retryAfter, "unavailable observations must not become quota exhaustion backoff")
+		})
+	}
 }
 
 func TestBillingErrorDetails_UnknownErrorFallsBackTo403(t *testing.T) {
@@ -113,13 +137,15 @@ func TestBillingErrorDetails_T10_QuotaExhaustedReturns429WithRetryAfter(t *testi
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			status, code, _, retryAfter := billingErrorDetails(tc.err)
+			status, code, message, retryAfter := billingErrorDetails(tc.err)
 			if status != http.StatusTooManyRequests {
 				t.Errorf("status = %d, want 429", status)
 			}
 			if code != "rate_limit_exceeded" {
 				t.Errorf("code = %q, want rate_limit_exceeded", code)
 			}
+			require.NotEmpty(t, message)
+			require.NotEqual(t, service.ErrBillingServiceUnavailable.Message, message)
 			if retryAfter < 3599 || retryAfter > 3601 {
 				t.Errorf("retryAfter = %d, want ~3600", retryAfter)
 			}

@@ -24,6 +24,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
@@ -1403,6 +1404,7 @@ func newWeChatOAuthTestHandlerWithSettings(t *testing.T, invitationEnabled bool,
 		nil,
 	)
 
+	authSvc.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 	return &AuthHandler{
 		authService: authSvc,
 		settingSvc:  settingSvc,

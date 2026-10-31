@@ -4,7 +4,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +19,10 @@ import (
 // fakeIncrCache 仅记录 IncrUserPlatformQuotaUsageCache 被调用的参数。
 type fakeIncrCache struct {
 	BillingCache
-	calls []incrCall
+	calls       []incrCall
+	result      UserPlatformQuotaIncrementResult
+	err         error
+	onIncrement func(context.Context)
 }
 
 type incrCall struct {
@@ -27,15 +33,18 @@ type incrCall struct {
 	markDirty bool
 }
 
-func (f *fakeIncrCache) IncrUserPlatformQuotaUsageCache(ctx context.Context, userID int64, platform string, cost float64, ttl time.Duration, markDirty bool) error {
+func (f *fakeIncrCache) IncrUserPlatformQuotaUsageCache(ctx context.Context, userID int64, platform string, cost float64, ttl time.Duration, markDirty bool) (UserPlatformQuotaIncrementResult, error) {
 	f.calls = append(f.calls, incrCall{userID, platform, cost, ttl, markDirty})
-	return nil
+	if f.onIncrement != nil {
+		f.onIncrement(ctx)
+	}
+	return f.result, f.err
 }
 
 // IncrementUserPlatformQuotaUsage 已改为同步直写,不再走 worker。
 // 测试验证:同步调用立即调到 cache.IncrUserPlatformQuotaUsageCache。
 func TestIncrementUserPlatformQuotaUsage_SyncCallsCache(t *testing.T) {
-	fake := &fakeIncrCache{}
+	fake := &fakeIncrCache{result: UserPlatformQuotaIncrementResult{Status: QuotaIncrementApplied}}
 	cfg := &config.Config{}
 	cfg.Billing.UserPlatformQuotaCacheTTLSeconds = 120
 
@@ -44,8 +53,12 @@ func TestIncrementUserPlatformQuotaUsage_SyncCallsCache(t *testing.T) {
 		cfg:   cfg,
 	}
 
-	s.IncrementUserPlatformQuotaUsage(101, "anthropic", 0.25)
-	s.IncrementUserPlatformQuotaUsage(101, "openai", 0.50)
+	if err := s.IncrementUserPlatformQuotaUsage(101, "anthropic", 0.25); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IncrementUserPlatformQuotaUsage(101, "openai", 0.50); err != nil {
+		t.Fatal(err)
+	}
 
 	if len(fake.calls) != 2 {
 		t.Fatalf("expected 2 incr calls, got %d", len(fake.calls))
@@ -62,11 +75,18 @@ func TestIncrementUserPlatformQuotaUsage_SyncCallsCache(t *testing.T) {
 
 // fakeQuotaRepo 实现 UserPlatformQuotaRepository 最小子集
 type fakeQuotaRepo struct {
-	rec *UserPlatformQuotaRecord
+	rec      *UserPlatformQuotaRecord
+	getErr   error
+	getCalls int
+	get      func(context.Context, int64, string) (*UserPlatformQuotaRecord, error)
 }
 
-func (f *fakeQuotaRepo) GetByUserPlatform(_ context.Context, _ int64, _ string) (*UserPlatformQuotaRecord, error) {
-	return f.rec, nil
+func (f *fakeQuotaRepo) GetByUserPlatform(ctx context.Context, userID int64, platform string) (*UserPlatformQuotaRecord, error) {
+	f.getCalls++
+	if f.get != nil {
+		return f.get(ctx, userID, platform)
+	}
+	return f.rec, f.getErr
 }
 
 func (f *fakeQuotaRepo) BulkInsertInitial(_ context.Context, _ []UserPlatformQuotaRecord) error {
@@ -103,7 +123,11 @@ type fakeFullCache struct {
 	setCalls    int           // SetUserPlatformQuotaCache 调用次数
 	lastSetTTL  time.Duration // 最近一次 Set 的 ttl
 	getErr      error         // 非 nil 时 Get 先返回 (nil,false,getErr)
-	setErr      error         // 非 nil 时 Set 返回该 err(setCalls 仍+1)
+	getCalls    int
+	casCalls    int
+	casErr      error
+	casHook     func(context.Context, *UserPlatformQuotaCacheEntry, *UserPlatformQuotaCacheEntry) (bool, error)
+	setErr      error // 非 nil 时 Set 返回该 err(setCalls 仍+1)
 	// dirty 模拟脏集，供 flusher 测试使用。
 	dirty map[UserPlatformQuotaKey]struct{}
 }
@@ -139,13 +163,15 @@ func (f *fakeFullCache) getLastSetTTL() time.Duration {
 func (f *fakeFullCache) GetUserPlatformQuotaCache(_ context.Context, _ int64, _ string) (*UserPlatformQuotaCacheEntry, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.getCalls++
 	if f.getErr != nil {
 		return nil, false, f.getErr
 	}
 	if f.entry == nil {
 		return nil, false, nil
 	}
-	return f.entry, true, nil
+	entry := *f.entry
+	return &entry, true, nil
 }
 
 func (f *fakeFullCache) SetUserPlatformQuotaCache(_ context.Context, _ int64, _ string, e *UserPlatformQuotaCacheEntry, ttl time.Duration) error {
@@ -227,172 +253,6 @@ func currentDayStart() *time.Time {
 	return &s
 }
 
-func TestCheckUserPlatformQuotaEligibility_AllowsWhenUnderLimit(t *testing.T) {
-	daily := 10.0
-	repo := &fakeQuotaRepo{rec: &UserPlatformQuotaRecord{
-		UserID: 1, Platform: "anthropic", DailyLimitUSD: &daily,
-	}}
-	cache := &fakeFullCache{entry: &UserPlatformQuotaCacheEntry{
-		DailyUsageUSD:    4.5,
-		DailyLimitUSD:    &daily,
-		DailyWindowStart: currentDayStart(),
-		SchemaVersion:    UserPlatformQuotaCacheSchemaV1,
-	}}
-	s := newServiceForPreflight(t, repo, cache)
-	if err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic"); err != nil {
-		t.Errorf("expected nil, got %v", err)
-	}
-}
-
-func TestCheckUserPlatformQuotaEligibility_DailyExhausted(t *testing.T) {
-	daily := 5.0
-	repo := &fakeQuotaRepo{rec: &UserPlatformQuotaRecord{
-		UserID: 1, Platform: "anthropic", DailyLimitUSD: &daily,
-	}}
-	cache := &fakeFullCache{entry: &UserPlatformQuotaCacheEntry{
-		DailyUsageUSD:    5.0,
-		DailyLimitUSD:    &daily,
-		DailyWindowStart: currentDayStart(),
-		SchemaVersion:    UserPlatformQuotaCacheSchemaV1,
-	}}
-	s := newServiceForPreflight(t, repo, cache)
-	err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic")
-	if !errors.Is(err, ErrUserPlatformDailyQuotaExhausted) {
-		t.Errorf("expected ErrUserPlatformDailyQuotaExhausted, got %v", err)
-	}
-}
-
-func TestCheckUserPlatformQuotaEligibility_NilLimitMeansUnlimited(t *testing.T) {
-	repo := &fakeQuotaRepo{rec: &UserPlatformQuotaRecord{
-		UserID: 1, Platform: "anthropic",
-	}}
-	cache := &fakeFullCache{entry: &UserPlatformQuotaCacheEntry{
-		DailyUsageUSD:    999,
-		DailyWindowStart: currentDayStart(),
-		SchemaVersion:    UserPlatformQuotaCacheSchemaV1,
-		// DailyLimitUSD nil → 无限额
-	}}
-	s := newServiceForPreflight(t, repo, cache)
-	if err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic"); err != nil {
-		t.Errorf("nil limits should be unlimited, got %v", err)
-	}
-}
-
-func TestCheckUserPlatformQuotaEligibility_ZeroLimitImmediateBlock(t *testing.T) {
-	zero := 0.0
-	repo := &fakeQuotaRepo{rec: &UserPlatformQuotaRecord{
-		UserID: 1, Platform: "anthropic", DailyLimitUSD: &zero,
-	}}
-	cache := &fakeFullCache{entry: &UserPlatformQuotaCacheEntry{
-		DailyUsageUSD:    0,
-		DailyLimitUSD:    &zero,
-		DailyWindowStart: currentDayStart(),
-		SchemaVersion:    UserPlatformQuotaCacheSchemaV1,
-	}}
-	s := newServiceForPreflight(t, repo, cache)
-	err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic")
-	if !errors.Is(err, ErrUserPlatformDailyQuotaExhausted) {
-		t.Errorf("expected daily exhausted for limit=0, got %v", err)
-	}
-}
-
-func TestCheckUserPlatformQuotaEligibility_NoRecordMeansUnlimited(t *testing.T) {
-	repo := &fakeQuotaRepo{rec: nil}
-	cache := &fakeFullCache{}
-	s := newServiceForPreflight(t, repo, cache)
-	if err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic"); err != nil {
-		t.Errorf("no record = unlimited, got %v", err)
-	}
-}
-
-// TestCheckUserPlatformQuotaEligibility_OldSchemaCacheMissTriggersDB 验证旧版 entry（SchemaVersion=0）
-// 触发 DB 回退路径，并在 DB 数据判断配额是否超限。
-// DB record 需设置有效的 window_start，否则 quotaWindowExpired 会将 usage 归零（nil 窗口视为已过期）。
-func TestCheckUserPlatformQuotaEligibility_OldSchemaCacheMissTriggersDB(t *testing.T) {
-	daily := 5.0
-	dayStart := currentDayStart()
-	repo := &fakeQuotaRepo{rec: &UserPlatformQuotaRecord{
-		UserID: 1, Platform: "anthropic", DailyLimitUSD: &daily, DailyUsageUSD: 6.0,
-		DailyWindowStart: dayStart,
-	}}
-	// SchemaVersion=0（旧 entry），应走 DB 路径
-	cache := &fakeFullCache{entry: &UserPlatformQuotaCacheEntry{DailyUsageUSD: 1.0}}
-	s := newServiceForPreflight(t, repo, cache)
-	err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic")
-	if !errors.Is(err, ErrUserPlatformDailyQuotaExhausted) {
-		t.Errorf("旧版 entry 应走 DB 路径并报 daily exhausted, got %v", err)
-	}
-}
-
-// TestCheckUserPlatformQuotaEligibility_WindowExpiredInCache 验证 cache HIT 时若窗口已过期，usage 归零，用户放行。
-func TestCheckUserPlatformQuotaEligibility_WindowExpiredInCache(t *testing.T) {
-	daily := 5.0
-	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC) // 远古窗口起始，肯定已过期
-	repo := &fakeQuotaRepo{rec: &UserPlatformQuotaRecord{
-		UserID: 1, Platform: "anthropic", DailyLimitUSD: &daily,
-	}}
-	cache := &fakeFullCache{entry: &UserPlatformQuotaCacheEntry{
-		DailyUsageUSD:    10.0, // 超限，但窗口已过期
-		DailyLimitUSD:    &daily,
-		DailyWindowStart: &past,
-		SchemaVersion:    UserPlatformQuotaCacheSchemaV1,
-	}}
-	s := newServiceForPreflight(t, repo, cache)
-	err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic")
-	if err != nil {
-		t.Errorf("过期窗口应归零放行, got %v", err)
-	}
-}
-
-// TestCheckUserPlatformQuotaEligibility_WindowExpiredRefreshesCache 验证:
-// V1 HIT 路径检测到窗口过期时,用 reset 后的 entry 同步覆盖 Redis(而非 Delete):
-//  1. 当前请求以本地清零值判断 → 放行
-//  2. cache entry 被替换为新 entry: usage 清零 + window_start 更新到当前窗口
-//     limit 保留;这样并发 IncrUserPlatformQuotaUsage 的 Lua INCR 可正确累加到新窗口。
-func TestCheckUserPlatformQuotaEligibility_WindowExpiredRefreshesCache(t *testing.T) {
-	daily := 5.0
-	// 远古窗口起始,确保 quotaWindowExpired 返回 true
-	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	repo := &fakeQuotaRepo{rec: &UserPlatformQuotaRecord{
-		UserID: 1, Platform: "anthropic", DailyLimitUSD: &daily,
-	}}
-	cache := &fakeFullCache{entry: &UserPlatformQuotaCacheEntry{
-		DailyUsageUSD:    10.0, // 超限,但窗口已过期 → 应被本地清零后放行
-		DailyLimitUSD:    &daily,
-		DailyWindowStart: &past,
-		SchemaVersion:    UserPlatformQuotaCacheSchemaV1,
-	}}
-	s := newServiceForPreflight(t, repo, cache)
-
-	// 本次 check 应放行(本地清零后 usage=0 < limit=5)
-	err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic")
-	if err != nil {
-		t.Errorf("过期窗口应归零放行, got %v", err)
-	}
-
-	// 验证 cache entry 已被刷新:usage 清零、limit 保留、window_start 更新到当前窗口
-	refreshed := cache.getEntry()
-	if refreshed == nil {
-		t.Fatal("窗口过期后 cache entry 不应为 nil(应被 SetCache 覆盖,而非 Delete)")
-	}
-	if refreshed.DailyUsageUSD != 0 {
-		t.Errorf("刷新后 DailyUsageUSD = %v, want 0", refreshed.DailyUsageUSD)
-	}
-	if refreshed.DailyLimitUSD == nil || *refreshed.DailyLimitUSD != daily {
-		t.Errorf("刷新后 DailyLimitUSD = %v, want %v(保留)", refreshed.DailyLimitUSD, daily)
-	}
-	if refreshed.SchemaVersion != UserPlatformQuotaCacheSchemaV1 {
-		t.Errorf("刷新后 SchemaVersion = %d, want V1", refreshed.SchemaVersion)
-	}
-	if refreshed.DailyWindowStart == nil || refreshed.DailyWindowStart.Equal(past) {
-		t.Errorf("刷新后 DailyWindowStart = %v, 应更新到当前窗口而非保留 past=%v", refreshed.DailyWindowStart, past)
-	}
-}
-
-// ── T5 tests: QueueUpdateUserPlatformQuotaUsage ───────────────────────────────
-
-// ── C-NEW-1: monthlyQuotaWindowExpired 30 天滚动测试 ─────────────────────────
-
 func TestMonthlyQuotaWindowExpired_NilStart(t *testing.T) {
 	if !monthlyQuotaWindowExpired(nil, time.Now().UTC()) {
 		t.Error("nil start should be considered expired")
@@ -471,21 +331,142 @@ func TestNextMonthlyResetFrom_ExpiredStart(t *testing.T) {
 	}
 }
 
-func TestIncrementUserPlatformQuotaUsage_GuardsAgainstEmpty(t *testing.T) {
-	fake := &fakeIncrCache{}
-	cfg := &config.Config{}
-	cfg.Billing.UserPlatformQuotaCacheTTLSeconds = 60
-	s := &BillingCacheService{
-		cache: fake,
-		cfg:   cfg,
+func TestIncrementUserPlatformQuotaUsage_InputGuards(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		userID   int64
+		platform string
+		cost     float64
+		wantErr  bool
+	}{
+		{name: "empty platform", userID: 1, cost: 0.5},
+		{name: "zero cost", userID: 1, platform: "openai"},
+		{name: "negative", userID: 1, platform: "openai", cost: -0.1, wantErr: true},
+		{name: "nan", userID: 1, platform: "openai", cost: math.NaN(), wantErr: true},
+		{name: "positive infinity", userID: 1, platform: "openai", cost: math.Inf(1), wantErr: true},
+		{name: "negative infinity", userID: 1, platform: "openai", cost: math.Inf(-1), wantErr: true},
+		{name: "zero user", platform: "openai", cost: 0.5, wantErr: true},
+		{name: "negative user", userID: -1, platform: "openai", cost: 0.5, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeIncrCache{}
+			s := &BillingCacheService{cache: fake}
+			err := s.IncrementUserPlatformQuotaUsage(tc.userID, tc.platform, tc.cost)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if len(fake.calls) != 0 {
+				t.Fatalf("guarded input made %d cache calls", len(fake.calls))
+			}
+		})
 	}
+	for _, s := range []*BillingCacheService{nil, {}} {
+		if err := s.IncrementUserPlatformQuotaUsage(1, "openai", 0.5); err == nil {
+			t.Fatal("missing cache must return an error")
+		}
+	}
+}
 
-	s.IncrementUserPlatformQuotaUsage(1, "", 0.5)        // empty platform → noop
-	s.IncrementUserPlatformQuotaUsage(1, "openai", 0)    // zero cost → noop
-	s.IncrementUserPlatformQuotaUsage(1, "openai", -0.1) // negative → noop
+func TestIncrementUserPlatformQuotaUsage_ExplicitResults(t *testing.T) {
+	transportErr := errors.New("commit response lost")
+	for _, tc := range []struct {
+		name    string
+		status  UserPlatformQuotaIncrementStatus
+		err     error
+		wantErr bool
+	}{
+		{name: "applied", status: QuotaIncrementApplied},
+		{name: "missing", status: QuotaIncrementMissing, wantErr: true},
+		{name: "incompatible", status: QuotaIncrementIncompatible, wantErr: true},
+		{name: "contended", status: QuotaIncrementContended, wantErr: true},
+		{name: "empty status", wantErr: true},
+		{name: "unknown status", status: "future-status", wantErr: true},
+		{name: "execution error", err: transportErr, wantErr: true},
+		{name: "applied with error", status: QuotaIncrementApplied, err: transportErr, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeIncrCache{result: UserPlatformQuotaIncrementResult{Status: tc.status}, err: tc.err}
+			err := (&BillingCacheService{cache: fake}).IncrementUserPlatformQuotaUsage(1, "openai", 0.5)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.err != nil && !errors.Is(err, tc.err) {
+				t.Fatalf("lost execution error: %v", err)
+			}
+			if tc.wantErr && tc.err == nil && !strings.Contains(err.Error(), string(tc.status)) {
+				t.Fatalf("missing result status in %v", err)
+			}
+			if len(fake.calls) != 1 {
+				t.Fatalf("non-idempotent increment retried %d times", len(fake.calls))
+			}
+			encoded, marshalErr := json.Marshal(fake.result)
+			if marshalErr != nil || string(encoded) != "{}" {
+				t.Fatalf("private result leaked: %s, %v", encoded, marshalErr)
+			}
+		})
+	}
+}
 
-	if len(fake.calls) != 0 {
-		t.Errorf("expected 0 calls (all guarded), got %d", len(fake.calls))
+func TestIncrementUserPlatformQuotaUsage_ConfigAndDirtyFlag(t *testing.T) {
+	zero := &config.Config{}
+	enabled := &config.Config{}
+	enabled.Billing.UserPlatformQuotaCacheTTLSeconds = 120
+	enabled.Database.UserPlatformQuotaFlusherEnabled = true
+	for _, tc := range []struct {
+		name      string
+		cfg       *config.Config
+		ttl       time.Duration
+		markDirty bool
+	}{
+		{name: "nil config", ttl: 24 * time.Hour},
+		{name: "zero ttl", cfg: zero, ttl: 24 * time.Hour},
+		{name: "enabled flusher", cfg: enabled, ttl: 120 * time.Second, markDirty: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeIncrCache{result: UserPlatformQuotaIncrementResult{Status: QuotaIncrementApplied}}
+			if err := (&BillingCacheService{cache: fake, cfg: tc.cfg}).IncrementUserPlatformQuotaUsage(1, "openai", 0.5); err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.calls) != 1 || fake.calls[0].ttl != tc.ttl || fake.calls[0].markDirty != tc.markDirty {
+				t.Fatalf("unexpected cache calls: %+v", fake.calls)
+			}
+		})
+	}
+}
+
+func TestIncrementUserPlatformQuotaUsage_WaitsForBoundedCommit(t *testing.T) {
+	entered := make(chan context.Context)
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	fake := &fakeIncrCache{
+		result: UserPlatformQuotaIncrementResult{Status: QuotaIncrementApplied},
+		onIncrement: func(ctx context.Context) {
+			entered <- ctx
+			<-release
+		},
+	}
+	go func() {
+		done <- (&BillingCacheService{cache: fake}).IncrementUserPlatformQuotaUsage(1, "openai", 0.5)
+	}()
+	ctx := <-entered
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > cacheWriteTimeout {
+		close(release)
+		<-done
+		t.Fatalf("bookkeeping context must be bounded: %v, %v", deadline, ok)
+	}
+	select {
+	case err := <-done:
+		close(release)
+		t.Fatalf("returned before cache committed: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("bookkeeping context not released: %v", ctx.Err())
 	}
 }
 
@@ -542,26 +523,6 @@ func (f *fakeZeroQuotaCache) GetUserBalanceCache(_ context.Context, _ int64) (fl
 
 // TestCheckUserPlatformQuotaEligibility_StandardMode_BlocksWhenLimitZero 验证：
 // standard 模式下 limit=0 的 platform quota 确实会被拦截（守卫底层逻辑正确）。
-func TestCheckUserPlatformQuotaEligibility_StandardMode_BlocksWhenLimitZero(t *testing.T) {
-	fake := &fakeZeroQuotaCache{}
-	cfg := &config.Config{}
-	cfg.Billing.UserPlatformQuotaCacheTTLSeconds = 60
-	s := &BillingCacheService{
-		cache:                 fake,
-		cfg:                   cfg,
-		userPlatformQuotaRepo: &fakeQuotaRepo{},
-	}
-	err := s.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic")
-	if !errors.Is(err, ErrUserPlatformDailyQuotaExhausted) {
-		t.Errorf("standard mode with limit=0 should return ErrUserPlatformDailyQuotaExhausted, got: %v", err)
-	}
-	if !fake.called {
-		t.Error("GetUserPlatformQuotaCache should have been called in standard mode")
-	}
-}
-
-// TestCheckBillingEligibility_SubscriptionMode_BypassesPlatformQuota 验证（C-NEW-2）：
-// 订阅模式用户不受 user×platform quota 拦截，GetUserPlatformQuotaCache 不应被调用。
 func TestCheckBillingEligibility_SubscriptionMode_BypassesPlatformQuota(t *testing.T) {
 	fake := &fakeZeroQuotaCache{} // GetUserPlatformQuotaCache 返回 limit=0，若被调用则拦截
 	cfg := &config.Config{}
@@ -596,32 +557,6 @@ func TestCheckBillingEligibility_SubscriptionMode_BypassesPlatformQuota(t *testi
 
 // TestCheckBillingEligibility_NonSubscriptionGroup_AppliesQuota 验证：
 // 非订阅模式（group=nil）用户 platform quota 超限时被拦截，quota cache 被查询。
-func TestCheckBillingEligibility_NonSubscriptionGroup_AppliesQuota(t *testing.T) {
-	called := &fakeZeroQuotaCache{}
-	cfg := &config.Config{}
-	cfg.Billing.UserPlatformQuotaCacheTTLSeconds = 60
-	s := &BillingCacheService{
-		cache:                 called,
-		cfg:                   cfg,
-		userPlatformQuotaRepo: &fakeQuotaRepo{},
-	}
-	err := s.checkUserPlatformQuotaEligibility(context.Background(), 99, "openai")
-	if !errors.Is(err, ErrUserPlatformDailyQuotaExhausted) {
-		t.Errorf("non-subscription mode quota check should block, got: %v", err)
-	}
-	if !called.called {
-		t.Error("GetUserPlatformQuotaCache should be consulted in non-subscription mode")
-	}
-}
-
-// ── B-3: monthlyQuotaWindowExpired 30 天边界表驱动测试 ────────────────────────
-// 覆盖 4 个必须场景:
-//  1. 恰好 30 天 → expired
-//  2. 30*24h - 1ns → not expired
-//  3. 跨月末（2024-02-28 → 2024-03-29T00:00:01Z）→ expired
-//  4. 跨年（2024-12-15 → 2025-01-14T00:00:01Z）→ expired
-//
-// repo 层 monthlyMaybeReset 不可导出，通过 service 层 monthlyQuotaWindowExpired 间接覆盖。
 func TestMonthlyQuotaWindowExpired_BoundaryTable(t *testing.T) {
 	const thirtyDays = 30 * 24 * time.Hour
 
@@ -672,161 +607,3 @@ func TestMonthlyQuotaWindowExpired_BoundaryTable(t *testing.T) {
 // TestCheckUserPlatformQuotaEligibility_NoRow_WritesSentinel 验证:
 // cache MISS + DB 无行时,回填 sentinel entry(三 limit 全 nil,三 window_start 全 non-nil),
 // TTL = UserPlatformQuotaSentinelTTLSeconds,函数返回 nil(fail-open)。
-func TestCheckUserPlatformQuotaEligibility_NoRow_WritesSentinel(t *testing.T) {
-	repo := &fakeQuotaRepo{rec: nil} // DB 无行
-	cache := &fakeFullCache{}        // entry=nil → Get 返回 MISS
-	svc := newServiceForPreflight(t, repo, cache)
-	svc.cfg.Billing.UserPlatformQuotaSentinelTTLSeconds = 3600
-
-	if err := svc.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic"); err != nil {
-		t.Fatalf("expected nil (fail-open), got %v", err)
-	}
-	if cache.getSetCalls() != 1 {
-		t.Fatalf("expected 1 SetUserPlatformQuotaCache call for sentinel, got %d", cache.getSetCalls())
-	}
-	sentinel := cache.getEntry()
-	if sentinel == nil {
-		t.Fatal("expected sentinel entry backfilled")
-	}
-	if sentinel.DailyLimitUSD != nil || sentinel.WeeklyLimitUSD != nil || sentinel.MonthlyLimitUSD != nil {
-		t.Errorf("sentinel must have all-nil limits")
-	}
-	if sentinel.DailyWindowStart == nil || sentinel.WeeklyWindowStart == nil || sentinel.MonthlyWindowStart == nil {
-		t.Errorf("sentinel must have non-nil window_start to avoid refresh churn")
-	}
-	if sentinel.SchemaVersion != UserPlatformQuotaCacheSchemaV1 {
-		t.Errorf("sentinel schema = %d, want V1", sentinel.SchemaVersion)
-	}
-	if cache.getLastSetTTL() != 3600*time.Second {
-		t.Errorf("sentinel ttl = %v, want 3600s", cache.getLastSetTTL())
-	}
-}
-
-// TestCheckUserPlatformQuotaEligibility_RedisGetError_NoSentinelBackfill 验证:
-// Redis GET 故障(cacheErr!=nil)+ DB 无行时,不应回填 sentinel(与 "Redis 故障时不回填" 一致),且 fail-open。
-func TestCheckUserPlatformQuotaEligibility_RedisGetError_NoSentinelBackfill(t *testing.T) {
-	repo := &fakeQuotaRepo{rec: nil}
-	cache := &fakeFullCache{getErr: errors.New("redis get down")}
-	svc := newServiceForPreflight(t, repo, cache)
-	svc.cfg.Billing.UserPlatformQuotaSentinelTTLSeconds = 3600
-
-	if err := svc.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic"); err != nil {
-		t.Fatalf("redis 故障应 fail-open, got %v", err)
-	}
-	if cache.getSetCalls() != 0 {
-		t.Errorf("redis-get-error 时不应回填 sentinel, got %d set calls", cache.getSetCalls())
-	}
-}
-
-// TestCheckUserPlatformQuotaEligibility_NoRow_SentinelSetFailsFailOpen 验证:
-// sentinel SET 失败时 fail-open(返回 nil)且计 metric。
-func TestCheckUserPlatformQuotaEligibility_NoRow_SentinelSetFailsFailOpen(t *testing.T) {
-	before := userPlatformQuotaSentinelSetCacheErrorTotal.Load()
-	repo := &fakeQuotaRepo{rec: nil}
-	cache := &fakeFullCache{setErr: errors.New("redis set timeout")}
-	svc := newServiceForPreflight(t, repo, cache)
-	svc.cfg.Billing.UserPlatformQuotaSentinelTTLSeconds = 3600
-
-	if err := svc.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic"); err != nil {
-		t.Fatalf("sentinel set 失败应 fail-open, got %v", err)
-	}
-	if cache.getSetCalls() != 1 {
-		t.Errorf("应尝试 set sentinel 恰好一次, got %d", cache.getSetCalls())
-	}
-	if got := userPlatformQuotaSentinelSetCacheErrorTotal.Load() - before; got != 1 {
-		t.Errorf("set 失败应使 metric +1, got delta %d", got)
-	}
-}
-
-// TestCheckUserPlatformQuotaEligibility_SentinelCrossDay_NoRefresh 验证:
-// 命中 sentinel(三 limit 全 nil)且跨窗口(daily/weekly 过期)时,不应触发 refresh SetCache
-// (否则会把短 sentinel TTL 误升级为 quota cache 默认 86400s)。
-func TestCheckUserPlatformQuotaEligibility_SentinelCrossDay_NoRefresh(t *testing.T) {
-	yesterday := timezone.StartOfDay(time.Now().AddDate(0, 0, -1))
-	lastWeek := timezone.StartOfWeek(time.Now().AddDate(0, 0, -7))
-	monthAgoOK := time.Now().AddDate(0, 0, -5) // <30d, monthly 不过期
-	sentinel := &UserPlatformQuotaCacheEntry{
-		SchemaVersion:      UserPlatformQuotaCacheSchemaV1,
-		DailyWindowStart:   &yesterday, // 跨日 → daily windowExpired = true
-		WeeklyWindowStart:  &lastWeek,  // 跨周 → weekly windowExpired = true
-		MonthlyWindowStart: &monthAgoOK,
-		// limits 全 nil → sentinel
-	}
-	cache := &fakeFullCache{entry: sentinel} // entry 非 nil → Get HIT
-	svc := newServiceForPreflight(t, &fakeQuotaRepo{}, cache)
-
-	if err := svc.checkUserPlatformQuotaEligibility(context.Background(), 1, "anthropic"); err != nil {
-		t.Fatalf("sentinel = no limit, expected nil, got %v", err)
-	}
-	if cache.getSetCalls() != 0 {
-		t.Errorf("sentinel cross-window must NOT trigger refresh SetCache, got %d calls", cache.getSetCalls())
-	}
-}
-
-// ── TestHasUserPlatformQuotaLimit ────────────────────────────────────────────
-
-func TestHasUserPlatformQuotaLimit(t *testing.T) {
-	daily := 5.0
-
-	tests := []struct {
-		name  string
-		setup func() *BillingCacheService
-		want  bool
-	}{
-		{
-			name: "has_limit",
-			setup: func() *BillingCacheService {
-				entry := &UserPlatformQuotaCacheEntry{DailyLimitUSD: &daily}
-				svc := newServiceForPreflight(t, &fakeQuotaRepo{}, &fakeFullCache{entry: entry})
-				return svc
-			},
-			want: true,
-		},
-		{
-			name: "sentinel_no_limit",
-			setup: func() *BillingCacheService {
-				entry := &UserPlatformQuotaCacheEntry{} // 三个 limit 字段全 nil
-				svc := newServiceForPreflight(t, &fakeQuotaRepo{}, &fakeFullCache{entry: entry})
-				return svc
-			},
-			want: false,
-		},
-		{
-			name: "cache_miss",
-			setup: func() *BillingCacheService {
-				// entry==nil → GetUserPlatformQuotaCache 返回 (nil,false,nil)
-				svc := newServiceForPreflight(t, &fakeQuotaRepo{}, &fakeFullCache{})
-				return svc
-			},
-			want: true, // fail-safe
-		},
-		{
-			name: "redis_err",
-			setup: func() *BillingCacheService {
-				svc := newServiceForPreflight(t, &fakeQuotaRepo{}, &fakeFullCache{getErr: errors.New("redis down")})
-				return svc
-			},
-			want: true, // fail-safe
-		},
-		{
-			name: "simple_mode",
-			setup: func() *BillingCacheService {
-				entry := &UserPlatformQuotaCacheEntry{DailyLimitUSD: &daily}
-				svc := newServiceForPreflight(t, &fakeQuotaRepo{}, &fakeFullCache{entry: entry})
-				svc.cfg.RunMode = config.RunModeSimple
-				return svc
-			},
-			want: false, // simple 模式始终跳过
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			svc := tt.setup()
-			got := svc.HasUserPlatformQuotaLimit(context.Background(), 1, "anthropic")
-			if got != tt.want {
-				t.Errorf("HasUserPlatformQuotaLimit() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}

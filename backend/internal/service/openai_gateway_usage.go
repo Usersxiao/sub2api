@@ -152,13 +152,20 @@ func groupBillsOpenAIFastAtStandard(apiKey *APIKey, account *Account, serviceTie
 }
 
 // RecordUsage records usage and deducts balance
-func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRecordUsageInput) error {
+func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRecordUsageInput) (recordErr error) {
+	defer completeRequiredUsageSettlement(ctx, &recordErr)
 	if input == nil {
 		return errors.New("openai usage input is nil")
 	}
 	result := input.Result
 	if result == nil {
 		return errors.New("openai usage result is nil")
+	}
+	if input.APIKey == nil || input.User == nil || input.Account == nil {
+		return errors.New("openai usage input is incomplete")
+	}
+	if err := requiredUsageSettlementError(ctx); err != nil {
+		return err
 	}
 	if s.rateLimitService != nil && input.Account != nil && input.Account.Platform == PlatformOpenAI {
 		s.rateLimitService.ResetOpenAI403Counter(ctx, input.Account.ID)
@@ -254,7 +261,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		pricingAt,
 	)
 	if err != nil {
-		if !isUsagePricingUnavailableError(err) {
+		if RequiredUsageSettlement(ctx) || !isUsagePricingUnavailableError(err) {
 			return err
 		}
 		logger.L().With(
@@ -493,6 +500,9 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	}
 
 	simpleModeKeyRateLimitOnly := simpleModeKeyRateLimitBillingEnabled(s.cfg, apiKey)
+	if RequiredUsageSettlement(ctx) && s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
+		return ErrUsageSettlementUnconfirmed
+	}
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple && !simpleModeKeyRateLimitOnly {
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
 		logger.LegacyPrintf("service.openai_gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
@@ -522,9 +532,15 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	}, s.billingDeps(), s.usageBillingRepo)
 
 	if billingErr != nil {
+		if RequiredUsageSettlement(ctx) {
+			return billingErr
+		}
 		usageLog.ActualCost = 0
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
 		return billingErr
+	}
+	if RequiredUsageSettlement(ctx) {
+		return writeRequiredUsageLog(ctx, s.usageLogRepo, usageLog)
 	}
 	writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
 

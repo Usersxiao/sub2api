@@ -5,12 +5,24 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
+)
+
+// Private bookkeeping failures must never make an already-billed request
+// retryable. Keep these separate from the existing DB fallback counters.
+var (
+	userPlatformQuotaCacheIncrErrorTotal atomic.Int64
+	// Retained legacy cache failures; the money-only fallback now records a
+	// separate source gap instead of invoking any unbound platform writer.
+	userPlatformQuotaCacheIncrLegacyErrorTotal atomic.Int64
+	userPlatformQuotaReceiptErrorTotal         atomic.Int64
+	userPlatformQuotaLegacyUnboundErrorTotal   atomic.Int64
 )
 
 func (s *GatewayService) getUserGroupRateMultiplier(ctx context.Context, userID, groupID int64, groupDefaultMultiplier float64) float64 {
@@ -188,24 +200,11 @@ func postUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *bill
 		}
 	}
 
-	// Platform quota 累加（legacy 兜底路径）：仅对 standard（余额）模式生效；订阅模式豁免；仅对有 limit 的用户写
-	//   - HasUserPlatformQuotaLimit 守卫:与正常路径对齐，无 limit 公司跳过
-	//   - 新增 Redis 同步写:enforcement 走 Redis，legacy 路径也必须同步写，否则 preflight 看不到消费
-	//   - flusher_enabled=false（降级）:保留原有同步直写 DB
-	//   - flusher_enabled=true:跳过直写 DB，由 flusher 异步批量刷（markDirty 在 IncrementUserPlatformQuotaUsage 内部完成）
-	//   - 失败仅记 ALERT log + counter，不阻断主扣费流程
-	if !p.IsSubscriptionBill && p.Platform != "" && cost.ActualCost > 0 && p.User != nil && deps.userPlatformQuotaRepo != nil {
-		if deps.billingCacheService.HasUserPlatformQuotaLimit(billingCtx, p.User.ID, p.Platform) {
-			deps.billingCacheService.IncrementUserPlatformQuotaUsage(p.User.ID, p.Platform, cost.ActualCost)
-			if deps.cfg == nil || !deps.cfg.Database.UserPlatformQuotaFlusherEnabled {
-				// 降级路径:flusher 未启用时保留原有同步直写 DB
-				if err := deps.userPlatformQuotaRepo.IncrementUsageWithReset(billingCtx, p.User.ID, p.Platform, cost.ActualCost, time.Now().UTC()); err != nil {
-					userPlatformQuotaDBIncrLegacyErrorTotal.Add(1)
-					logger.LegacyPrintf("service.gateway", "ALERT: legacy incr user platform quota DB failed user=%d platform=%s cost=%f: %v", p.User.ID, p.Platform, cost.ActualCost, err)
-				}
-			}
-			// flusher_enabled=true:不直写 DB，flusher 异步批量刷
-		}
+	// This fallback has no committed ordinary journal receipt. Retain its money
+	// semantics, but never invent an Apply identity from today's quota row.
+	if !p.IsSubscriptionBill && p.Platform != "" && cost.ActualCost > 0 && p.User != nil {
+		userPlatformQuotaLegacyUnboundErrorTotal.Add(1)
+		logger.LegacyPrintf("service.gateway", "ALERT: legacy user platform quota bookkeeping skipped without committed source user=%d platform=%s cost=%f", p.User.ID, p.Platform, cost.ActualCost)
 	}
 
 	// NOTE: finalizePostUsageBilling is NOT called here to avoid double-queuing
@@ -215,6 +214,9 @@ func postUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *bill
 }
 
 func resolveUsageBillingRequestID(ctx context.Context, upstreamRequestID string) string {
+	if requestID := requiredUsageRequestID(ctx); requestID != "" {
+		return requestID
+	}
 	// Forced durable money-event IDs must win over client/local context IDs so
 	// standalone web_search / async video cannot collapse under a reused client id.
 	if requestID := strings.TrimSpace(upstreamRequestID); requestID != "" {
@@ -355,10 +357,21 @@ func buildUsageBillingCommand(requestID string, usageLog *UsageLog, p *postUsage
 
 func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog, p *postUsageBillingParams, deps *billingDeps, repo UsageBillingRepository) (bool, error) {
 	if p == nil || deps == nil {
+		if RequiredUsageSettlement(ctx) {
+			return false, ErrUsageSettlementUnconfirmed
+		}
 		return false, nil
 	}
 
 	cmd := buildUsageBillingCommand(requestID, usageLog, p)
+	if RequiredUsageSettlement(ctx) {
+		if repo == nil {
+			return false, ErrUsageSettlementUnconfirmed
+		}
+		if err := validateRequiredUsageBilling(ctx, cmd, usageLog); err != nil {
+			return false, err
+		}
+	}
 	if cmd == nil || cmd.RequestID == "" || repo == nil {
 		if p.SimpleModeKeyRateLimitOnly {
 			return false, ErrSimpleModeKeyRateLimitBillingUnavailable
@@ -372,8 +385,35 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 	billingCtx, cancel := detachedBillingContext(ctx)
 	defer cancel()
 
+	var alreadySettled bool
+	var err error
+	cmd, alreadySettled, err = stageRequiredUsageSettlement(billingCtx, cmd, usageLog, p.Platform)
+	if err != nil {
+		return false, err
+	}
+	if alreadySettled {
+		return false, nil
+	}
+	// Ordinary credentials get an independent atomic source proof. Durable
+	// client settlements retain their own v2 journal, while simple mode and
+	// absent platform metadata keep their existing accounting scope.
+	if !durableUsageSettlement(billingCtx) && !p.SimpleModeKeyRateLimitOnly && p.APIKey.IsCredential() && p.Platform != "" {
+		if deps.cfg == nil || !deps.cfg.Database.UserPlatformQuotaFlusherEnabled {
+			cmd.OrdinaryPlatformQuotaDeliveryMode = UsageBillingOrdinaryPlatformDeliveryDBV1
+		}
+		cmd.OrdinaryPlatformQuota, err = FreezeUsageBillingOrdinaryPlatformIntent(cmd, p.Platform, p.Cost.ActualCost, p.IsSubscriptionBill)
+		if err != nil {
+			return false, err
+		}
+	}
 	result, err := repo.Apply(billingCtx, cmd)
 	if err != nil {
+		return false, err
+	}
+	if err := observeRequiredUsageBilling(ctx, cmd, result); err != nil {
+		return false, err
+	}
+	if err := recordRequiredPlatformQuota(billingCtx); err != nil {
 		return false, err
 	}
 
@@ -388,11 +428,11 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 		}
 	}
 
-	finalizePostUsageBilling(billingCtx, p, deps, result)
+	finalizePostUsageBilling(billingCtx, cmd, p, deps, result)
 	return true, nil
 }
 
-func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
+func finalizePostUsageBilling(ctx context.Context, cmd *UsageBillingCommand, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
 	if p == nil || p.Cost == nil || deps == nil {
 		return
 	}
@@ -425,44 +465,81 @@ func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, de
 
 	deps.deferredService.ScheduleLastUsedUpdate(p.Account.ID)
 
-	// Platform quota 累加：仅在 standard（余额）模式生效；订阅模式豁免；仅对有 limit 的用户写
-	// Redis 同步写 + DB 异步持久化（flag=false 降级）或 flusher 异步刷（flag=true）:
-	//   - HasUserPlatformQuotaLimit 守卫:无 limit 的公司跳过,避免无效写入 + 浪费 Redis 容量
-	//   - Redis 同步:确保下次 preflight 立即看到最新 usage,把 TOCTOU 超支窗口
-	//     限制在并发 in-flight 请求数量内（旧实现的异步入队会让超支无限累积直到 worker 处理）
-	//   - DB 异步(flusher_enabled=false):在独立 goroutine 中走 detached context,失败用 ALERT log 触发 oncall 对账
-	//   - flusher_enabled=true:不直写 DB,由 flusher 异步批量刷（markDirty 已在 IncrementUserPlatformQuotaUsage 内部完成）
-	if !p.IsSubscriptionBill && p.Platform != "" && p.Cost.ActualCost > 0 && p.User != nil && deps.userPlatformQuotaRepo != nil && deps.billingCacheService != nil {
-		if deps.billingCacheService.HasUserPlatformQuotaLimit(ctx, p.User.ID, p.Platform) {
-			deps.billingCacheService.IncrementUserPlatformQuotaUsage(p.User.ID, p.Platform, p.Cost.ActualCost)
-			if deps.cfg == nil || !deps.cfg.Database.UserPlatformQuotaFlusherEnabled {
-				// 降级路径:flusher 未启用时保留原有异步直写 DB
-				dbCtx, dbCancel := detachUpstreamContext(ctx)
-				userID, platform, cost := p.User.ID, p.Platform, p.Cost.ActualCost
-				go func() {
-					defer func() {
-						if r := recover(); r != nil {
-							logger.LegacyPrintf("service.gateway", "ALERT: panic in user platform quota incr goroutine user=%d platform=%s: %v", userID, platform, r)
-						}
-					}()
-					defer dbCancel()
-					if err := deps.userPlatformQuotaRepo.IncrementUsageWithReset(dbCtx, userID, platform, cost, time.Now().UTC()); err != nil {
-						// 失败计数器:暴露给 GatewayUserPlatformQuotaIncrStats(),由 ops 面板做斜率告警。
-						userPlatformQuotaDBIncrErrorTotal.Add(1)
-						// ALERT 级别:DB 持久化失败意味着 Redis cache 失效后该笔 cost 永久丢失,
-						// 用户配额视图与实际消费会偏差,oncall 需要据此对账或人工补录。
-						logger.LegacyPrintf("service.gateway", "ALERT: incr user platform quota DB failed user=%d platform=%s cost=%f: %v", userID, platform, cost, err)
-					}
-				}()
-			}
-			// flusher_enabled=true:不直写 DB,flusher 异步批量刷
-		}
-	}
+	finalizeOrdinaryPlatformQuota(ctx, cmd, p, deps, result)
 
 	// Notification checks run async — all parameters are already captured,
 	// no dependency on the request context or upstream connection.
 	go notifyBalanceLow(p, deps, result)
 	go notifyAccountQuota(p, deps, result)
+}
+
+func finalizeOrdinaryPlatformQuota(ctx context.Context, cmd *UsageBillingCommand, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
+	if durableUsageSettlement(ctx) || p.SimpleModeKeyRateLimitOnly || p.Platform == "" || result == nil || !result.Applied {
+		return
+	}
+	receipt := result.OrdinaryPlatformQuotaReceipt
+	if p.APIKey == nil || !p.APIKey.IsCredential() || p.User == nil || cmd == nil ||
+		cmd.UserID != p.User.ID || cmd.APIKeyID != p.APIKey.ID || cmd.OrdinaryPlatformQuota == nil ||
+		cmd.OrdinaryPlatformQuota.Platform != p.Platform || cmd.OrdinaryPlatformQuota.IsSubscription != p.IsSubscriptionBill ||
+		ValidateUsageBillingOrdinaryPlatformReceipt(cmd, receipt) != nil {
+		userPlatformQuotaReceiptErrorTotal.Add(1)
+		logger.LegacyPrintf("service.gateway", "ALERT: ordinary user platform quota bookkeeping skipped without valid committed source platform=%s", p.Platform)
+		return
+	}
+	if receipt.Disposition != "metered" {
+		return
+	}
+	useDBDelivery := deps.cfg == nil || !deps.cfg.Database.UserPlatformQuotaFlusherEnabled
+	if useDBDelivery && ValidateUsageBillingOrdinaryPlatformDelivery(cmd, receipt) != nil {
+		userPlatformQuotaReceiptErrorTotal.Add(1)
+		logger.LegacyPrintf("service.gateway", "ALERT: ordinary user platform quota delivery skipped without committed DB qualification user=%d platform=%s", p.User.ID, p.Platform)
+		return
+	}
+	binding, err := receipt.UsageBinding()
+	if err != nil {
+		userPlatformQuotaReceiptErrorTotal.Add(1)
+		logger.LegacyPrintf("service.gateway", "ALERT: invalid ordinary user platform quota binding user=%d platform=%s: %v", p.User.ID, p.Platform, err)
+		return
+	}
+	if err := deps.billingCacheService.IncrementBoundUserPlatformQuotaUsage(binding); err != nil {
+		userPlatformQuotaCacheIncrErrorTotal.Add(1)
+		logger.LegacyPrintf("service.gateway", "ALERT: bound user platform quota cache unconfirmed user=%d platform=%s cost=%f: %v", binding.UserID, binding.Platform, binding.CostUSD, err)
+	}
+	if !useDBDelivery {
+		return
+	}
+	writer, ok := deps.userPlatformQuotaRepo.(UserPlatformQuotaOrdinaryDeliveryRepository)
+	if !ok {
+		userPlatformQuotaDBIncrErrorTotal.Add(1)
+		logger.LegacyPrintf("service.gateway", "ALERT: ordinary user platform quota source consumer unavailable user=%d platform=%s", binding.UserID, binding.Platform)
+		return
+	}
+	// Capture the immutable Apply observation before detaching. No current-row
+	// lookup, bookkeeping clock replacement or legacy writer is permitted.
+	dbBase := context.Background()
+	if ctx != nil {
+		dbBase = context.WithoutCancel(ctx)
+	}
+	dbCtx, dbCancel := context.WithTimeout(dbBase, postUsageBillingTimeout)
+	deliveryCmd := *cmd
+	deliveryIntent := *cmd.OrdinaryPlatformQuota
+	deliveryCmd.OrdinaryPlatformQuota = &deliveryIntent
+	deliveryReceipt := *receipt
+	go func() {
+		defer dbCancel()
+		defer func() {
+			if r := recover(); r != nil {
+				userPlatformQuotaDBIncrErrorTotal.Add(1)
+				logger.LegacyPrintf("service.gateway", "ALERT: panic in bound user platform quota DB increment user=%d platform=%s: %v", binding.UserID, binding.Platform, r)
+			}
+		}()
+		result, err := writer.ConsumeOrdinaryPlatformQuotaUsage(dbCtx, &deliveryCmd, &deliveryReceipt)
+		if err != nil || ValidateUsageBillingOrdinaryPlatformDeliveryResult(&deliveryCmd, &deliveryReceipt, result, false) != nil ||
+			result.State != OrdinaryPlatformDeliveryCompleted || result.Outcome.Status != QuotaIncrementApplied || result.Outcome.AppliedWindows != QuotaWindowAll {
+			userPlatformQuotaDBIncrErrorTotal.Add(1)
+			logger.LegacyPrintf("service.gateway", "ALERT: ordinary user platform quota DB delivery unconfirmed user=%d platform=%s state=%s status=%s windows=%d: %v", binding.UserID, binding.Platform, result.State, result.Outcome.Status, result.Outcome.AppliedWindows, err)
+		}
+	}()
 }
 
 func syncBalanceCacheAfterDeduction(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
@@ -571,6 +648,11 @@ func notifyAccountQuota(p *postUsageBillingParams, deps *billingDeps, result *Us
 }
 
 func detachedBillingContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if RequiredUsageSettlement(ctx) {
+		// The mandatory caller already detached the HTTP cancellation. Retain
+		// its deadline so billing plus persistence share one bounded window.
+		return context.WithTimeout(ctx, postUsageBillingTimeout)
+	}
 	base := context.Background()
 	if ctx != nil {
 		base = context.WithoutCancel(ctx)
@@ -654,6 +736,11 @@ func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usage
 
 // RecordUsage 记录使用量并扣费（或更新订阅用量）
 func (s *GatewayService) RecordUsage(ctx context.Context, input *RecordUsageInput) error {
+	if input == nil {
+		err := errors.New("gateway usage input is nil")
+		FailRequiredUsageSettlement(ctx, err)
+		return err
+	}
 	return s.recordUsageCore(ctx, &recordUsageCoreInput{
 		Result:             input.Result,
 		APIKey:             input.APIKey,
@@ -769,7 +856,14 @@ func logResponseModelBillingApplied(component string, account *Account, requestI
 }
 
 // recordUsageCore 是 RecordUsage 的核心实现。
-func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsageCoreInput) error {
+func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsageCoreInput) (recordErr error) {
+	defer completeRequiredUsageSettlement(ctx, &recordErr)
+	if input == nil || input.Result == nil || input.APIKey == nil || input.User == nil || input.Account == nil {
+		return errors.New("gateway usage input is incomplete")
+	}
+	if err := requiredUsageSettlementError(ctx); err != nil {
+		return err
+	}
 	result := input.Result
 	apiKey := input.APIKey
 	user := input.User
@@ -828,6 +922,9 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 			}
 		}
 	}
+	if err := requiredUsageSettlementError(ctx); err != nil {
+		return err
+	}
 
 	// 判断计费方式：订阅模式 vs 余额模式
 	isSubscriptionBilling := subscription != nil && apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
@@ -862,6 +959,9 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	}
 
 	simpleModeKeyRateLimitOnly := simpleModeKeyRateLimitBillingEnabled(s.cfg, apiKey)
+	if RequiredUsageSettlement(ctx) && s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
+		return ErrUsageSettlementUnconfirmed
+	}
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple && !simpleModeKeyRateLimitOnly {
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
 		logger.LegacyPrintf("service.gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
@@ -895,9 +995,15 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	}, s.billingDeps(), s.usageBillingRepo)
 
 	if billingErr != nil {
+		if RequiredUsageSettlement(ctx) {
+			return billingErr
+		}
 		usageLog.ActualCost = 0
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
 		return billingErr
+	}
+	if RequiredUsageSettlement(ctx) {
+		return writeRequiredUsageLog(ctx, s.usageLogRepo, usageLog)
 	}
 	writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
 
@@ -1206,6 +1312,7 @@ func (s *GatewayService) calculateImageCost(
 			Resolved:        resolved,
 		})
 		if err != nil {
+			FailRequiredUsageSettlement(ctx, err)
 			logger.LegacyPrintf("service.gateway", "Calculate image token cost failed: %v", err)
 			return &CostBreakdown{ActualCost: 0}
 		}
@@ -1254,6 +1361,7 @@ func (s *GatewayService) calculateTokenCost(
 		Resolved:        resolved,
 	})
 	if err != nil {
+		FailRequiredUsageSettlement(ctx, err)
 		logger.LegacyPrintf("service.gateway", "Calculate cost failed: %v", err)
 		return &CostBreakdown{ActualCost: 0}
 	}

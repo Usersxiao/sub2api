@@ -39,12 +39,16 @@ func newAPIKeyRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *apiKeyR
 
 func (r *apiKeyRepository) activeQuery() *dbent.APIKeyQuery {
 	// 默认过滤已软删除记录，避免删除后仍被查询到。
-	return r.client.APIKey.Query().Where(apikey.DeletedAtIsNil())
+	return r.client.APIKey.Query().Where(apikey.DeletedAtIsNil(), apikey.KindEQ(service.APIKeyKindCredential))
 }
 
 func (r *apiKeyRepository) Create(ctx context.Context, key *service.APIKey) error {
+	if !key.IsCredential() {
+		return service.ErrAPIKeyNotFound
+	}
 	builder := r.client.APIKey.Create().
 		SetUserID(key.UserID).
+		SetKind(service.APIKeyKindCredential).
 		SetKey(key.Key).
 		SetName(key.Name).
 		SetStatus(key.Status).
@@ -66,6 +70,7 @@ func (r *apiKeyRepository) Create(ctx context.Context, key *service.APIKey) erro
 
 	created, err := builder.Save(ctx)
 	if err == nil {
+		key.Kind = created.Kind
 		key.ID = created.ID
 		key.LastUsedAt = created.LastUsedAt
 		key.CreatedAt = created.CreatedAt
@@ -132,6 +137,7 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 		Where(apikey.KeyEQ(key)).
 		Select(
 			apikey.FieldID,
+			apikey.FieldKind,
 			apikey.FieldUserID,
 			apikey.FieldGroupID,
 			apikey.FieldName,
@@ -256,7 +262,7 @@ func (r *apiKeyRepository) Update(ctx context.Context, key *service.APIKey, fiel
 	client := clientFromContext(ctx, r.client)
 	now := time.Now()
 	builder := client.APIKey.Update().
-		Where(apikey.IDEQ(key.ID), apikey.DeletedAtIsNil()).
+		Where(apikey.IDEQ(key.ID), apikey.DeletedAtIsNil(), apikey.KindEQ(service.APIKeyKindCredential)).
 		SetUpdatedAt(now)
 	if fields.Name {
 		builder.SetName(key.Name)
@@ -349,7 +355,7 @@ func (r *apiKeyRepository) Delete(ctx context.Context, id int64) error {
 	tombstoneKey := fmt.Sprintf("__deleted__%d__%d", id, time.Now().UnixNano())
 	// 显式软删除：避免依赖 Hook 行为，确保 deleted_at 一定被设置。
 	affected, err := r.client.APIKey.Update().
-		Where(apikey.IDEQ(id), apikey.DeletedAtIsNil()).
+		Where(apikey.IDEQ(id), apikey.DeletedAtIsNil(), apikey.KindEQ(service.APIKeyKindCredential)).
 		SetKey(tombstoneKey).
 		SetDeletedAt(time.Now()).
 		Save(ctx)
@@ -361,7 +367,7 @@ func (r *apiKeyRepository) Delete(ctx context.Context, id int64) error {
 	}
 	if affected == 0 {
 		exists, err := r.client.APIKey.Query().
-			Where(apikey.IDEQ(id)).
+			Where(apikey.IDEQ(id), apikey.KindEQ(service.APIKeyKindCredential)).
 			Exist(mixins.SkipSoftDelete(ctx))
 		if err != nil {
 			return err
@@ -408,7 +414,7 @@ func (r *apiKeyRepository) deleteWithTombstone(ctx context.Context, exec *dbent.
 	res, err := exec.ExecContext(ctx, `
 		UPDATE api_keys
 		SET key = $1, deleted_at = NOW(), updated_at = NOW()
-		WHERE id = $2 AND deleted_at IS NULL`, tombstoneKey, id)
+		WHERE id = $2 AND deleted_at IS NULL AND kind = 'api_key'`, tombstoneKey, id)
 	if err != nil {
 		return err
 	}
@@ -419,7 +425,7 @@ func (r *apiKeyRepository) deleteWithTombstone(ctx context.Context, exec *dbent.
 	if affected == 0 {
 		// 并发/重复删除:记录已存在(已软删)则幂等返回 nil(defer 回滚空事务),否则 NotFound。
 		exists, existErr := r.client.APIKey.Query().
-			Where(apikey.IDEQ(id)).
+			Where(apikey.IDEQ(id), apikey.KindEQ(service.APIKeyKindCredential)).
 			Exist(mixins.SkipSoftDelete(ctx))
 		if existErr != nil {
 			return existErr
@@ -601,7 +607,7 @@ func (r *apiKeyRepository) VerifyOwnership(ctx context.Context, userID int64, ap
 	}
 
 	ids, err := r.client.APIKey.Query().
-		Where(apikey.UserIDEQ(userID), apikey.IDIn(apiKeyIDs...), apikey.DeletedAtIsNil()).
+		Where(apikey.UserIDEQ(userID), apikey.IDIn(apiKeyIDs...), apikey.DeletedAtIsNil(), apikey.KindEQ(service.APIKeyKindCredential)).
 		IDs(ctx)
 	if err != nil {
 		return nil, err
@@ -721,7 +727,7 @@ func (r *apiKeyRepository) SearchAPIKeys(ctx context.Context, userID int64, keyw
 // ClearGroupIDByGroupID 将指定分组的所有 API Key 的 group_id 设为 nil
 func (r *apiKeyRepository) ClearGroupIDByGroupID(ctx context.Context, groupID int64) (int64, error) {
 	n, err := r.client.APIKey.Update().
-		Where(apikey.GroupIDEQ(groupID), apikey.DeletedAtIsNil()).
+		Where(apikey.GroupIDEQ(groupID), apikey.DeletedAtIsNil(), apikey.KindEQ(service.APIKeyKindCredential)).
 		ClearGroupID().
 		Save(ctx)
 	return int64(n), err
@@ -731,7 +737,7 @@ func (r *apiKeyRepository) ClearGroupIDByGroupID(ctx context.Context, groupID in
 func (r *apiKeyRepository) UpdateGroupIDByUserAndGroup(ctx context.Context, userID, oldGroupID, newGroupID int64) (int64, error) {
 	client := clientFromContext(ctx, r.client)
 	n, err := client.APIKey.Update().
-		Where(apikey.UserIDEQ(userID), apikey.GroupIDEQ(oldGroupID), apikey.DeletedAtIsNil()).
+		Where(apikey.UserIDEQ(userID), apikey.GroupIDEQ(oldGroupID), apikey.DeletedAtIsNil(), apikey.KindEQ(service.APIKeyKindCredential)).
 		SetGroupID(newGroupID).
 		Save(ctx)
 	return int64(n), err
@@ -884,29 +890,31 @@ func apiKeyEntityToService(m *dbent.APIKey) *service.APIKey {
 		return nil
 	}
 	out := &service.APIKey{
-		ID:            m.ID,
-		UserID:        m.UserID,
-		Key:           m.Key,
-		Name:          m.Name,
-		Status:        m.Status,
-		IPWhitelist:   m.IPWhitelist,
-		IPBlacklist:   m.IPBlacklist,
-		LastUsedAt:    m.LastUsedAt,
-		CreatedAt:     m.CreatedAt,
-		UpdatedAt:     m.UpdatedAt,
-		GroupID:       m.GroupID,
-		Quota:         m.Quota,
-		QuotaUsed:     m.QuotaUsed,
-		ExpiresAt:     m.ExpiresAt,
-		RateLimit5h:   m.RateLimit5h,
-		RateLimit1d:   m.RateLimit1d,
-		RateLimit7d:   m.RateLimit7d,
-		Usage5h:       m.Usage5h,
-		Usage1d:       m.Usage1d,
-		Usage7d:       m.Usage7d,
-		Window5hStart: m.Window5hStart,
-		Window1dStart: m.Window1dStart,
-		Window7dStart: m.Window7dStart,
+		ID:               m.ID,
+		Kind:             m.Kind,
+		ClientConsumerID: m.ClientConsumerID,
+		UserID:           m.UserID,
+		Key:              m.Key,
+		Name:             m.Name,
+		Status:           m.Status,
+		IPWhitelist:      m.IPWhitelist,
+		IPBlacklist:      m.IPBlacklist,
+		LastUsedAt:       m.LastUsedAt,
+		CreatedAt:        m.CreatedAt,
+		UpdatedAt:        m.UpdatedAt,
+		GroupID:          m.GroupID,
+		Quota:            m.Quota,
+		QuotaUsed:        m.QuotaUsed,
+		ExpiresAt:        m.ExpiresAt,
+		RateLimit5h:      m.RateLimit5h,
+		RateLimit1d:      m.RateLimit1d,
+		RateLimit7d:      m.RateLimit7d,
+		Usage5h:          m.Usage5h,
+		Usage1d:          m.Usage1d,
+		Usage7d:          m.Usage7d,
+		Window5hStart:    m.Window5hStart,
+		Window1dStart:    m.Window1dStart,
+		Window7dStart:    m.Window7dStart,
 	}
 	if m.Edges.User != nil {
 		out.User = userEntityToService(m.Edges.User)
@@ -935,6 +943,7 @@ func userEntityToService(u *dbent.User) *service.User {
 		Username:                   u.Username,
 		Notes:                      u.Notes,
 		PasswordHash:               u.PasswordHash,
+		SessionEpoch:               u.SessionEpoch,
 		Role:                       u.Role,
 		Balance:                    u.Balance,
 		FrozenBalance:              u.FrozenBalance,

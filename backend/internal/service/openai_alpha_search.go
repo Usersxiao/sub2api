@@ -30,6 +30,9 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	if s == nil || c == nil || account == nil {
 		return nil, fmt.Errorf("service, context, and account are required")
 	}
+	if ClientInvocationProviderPayloadAuthorizationRequired(ctx) && !ClientInvocationSearchAccountSupported(account) {
+		return nil, ErrClientInvocationProviderPayload
+	}
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
@@ -67,7 +70,7 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	// /responses，但会被 standalone /alpha/search 的 access enforcement
 	// 拒绝为 no_matching_rule。对 PAT 账号使用等价的 hosted web_search
 	// Responses 路径兜底，避免把可用账号误判为搜索不可用。
-	if account.IsOpenAIPersonalAccessToken() {
+	if account.IsOpenAIPersonalAccessToken() || (ClientInvocationProviderPayloadAuthorizationRequired(ctx) && ClientInvocationSearchAccountSupported(account)) {
 		return s.forwardAlphaSearchViaResponsesWebSearch(ctx, c, account, body, token, proxyURL, requestedModel, upstreamModel)
 	}
 
@@ -151,6 +154,9 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 		upstreamModel = requestedModel
 	}
 	responsesBody, err := buildOpenAIAlphaSearchResponsesWebSearchBody(alphaBody, upstreamModel)
+	if ClientInvocationProviderPayloadAuthorizationRequired(ctx) {
+		responsesBody, err = buildClientSearchProviderBody(alphaBody, upstreamModel)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +213,18 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 		s.UpdateCodexUsageSnapshotFromHeaders(ctx, account.ID, resp.Header)
 	}
 	alphaRespBody, err := openAIAlphaSearchResponseFromResponsesSSE(respBody)
+	if ClientInvocationProviderPayloadAuthorizationRequired(ctx) {
+		// The gate owns the original query and bound, never any ingress provider fields.
+		gate, _ := ctx.Value(clientInvocationProviderPayloadAuthorizerKey{}).(*clientInvocationProviderPayloadGate)
+		if gate == nil || gate.prepared == nil || gate.prepared.Search == nil {
+			return nil, ErrClientInvocationProviderPayload
+		}
+		output, normalizeErr := normalizeClientSearchSSE(respBody, gate.prepared.Request)
+		if normalizeErr != nil {
+			return nil, normalizeErr
+		}
+		alphaRespBody, err = json.Marshal(output)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +246,24 @@ func openAIAlphaSearchSchedulingModel(account *Account, requestedModel string) s
 }
 
 func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(ctx context.Context, c *gin.Context, account *Account, alphaBody []byte, body []byte, token string) (*http.Request, error) {
+	// Keep the ordinary alpha/search contract unchanged. Only gated official
+	// API Key search uses this minimal Responses request, without Codex identity
+	// or administrator header overrides changing its authentication boundary.
+	if account != nil && account.Type == AccountTypeAPIKey {
+		proof := clientInvocationSearchProofForAccount(account)
+		if !ClientInvocationProviderPayloadAuthorizationRequired(ctx) || proof == nil || proof.Authority != "responses-apikey-v1" {
+			return nil, ErrClientInvocationProviderPayload
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/responses", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		return req, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatgptCodexURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -322,13 +358,17 @@ func buildOpenAIAlphaSearchResponsesWebSearchBody(alphaBody []byte, model string
 }
 
 func openAIAlphaSearchResponsesWebSearchPrompt(alphaBody []byte) string {
+	return openAIAlphaSearchResponsesWebSearchPromptWithLimit(alphaBody, 12000)
+}
+
+func openAIAlphaSearchResponsesWebSearchPromptWithLimit(alphaBody []byte, commandLimit int) string {
 	var b strings.Builder
 	_, _ = b.WriteString("Execute this Codex standalone web.run request for another model.\n")
 	_, _ = b.WriteString("Use the hosted web_search tool when web/current information is needed.\n")
 	_, _ = b.WriteString("Return concise source-backed results. Include titles, URLs, dates, and direct answers when available.\n")
 	if commands := strings.TrimSpace(gjson.GetBytes(alphaBody, "commands").Raw); commands != "" {
 		_, _ = b.WriteString("\nCommands JSON:\n")
-		_, _ = b.WriteString(truncateOpenAIAlphaSearchPromptJSON(commands, 12000))
+		_, _ = b.WriteString(truncateOpenAIAlphaSearchPromptJSON(commands, commandLimit))
 	}
 	if settings := strings.TrimSpace(gjson.GetBytes(alphaBody, "settings").Raw); settings != "" {
 		_, _ = b.WriteString("\n\nSearch settings JSON:\n")

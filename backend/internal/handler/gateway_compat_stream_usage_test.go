@@ -84,7 +84,7 @@ func runCompatStreamUsageHandler(t *testing.T, endpoint, upstreamStream string, 
 		usageRepo:   &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 2)},
 		billingRepo: &compatStreamUsageBillingRepo{},
 	}
-	billingCache := service.NewBillingCacheService(newHandlerInflightCache(100), nil, nil, nil, nil, nil, cfg, nil)
+	billingCache := service.NewBillingCacheService(newHandlerInflightCache(100), nil, nil, nil, nil, nil, cfg, noConfiguredPlatformQuota{})
 	t.Cleanup(billingCache.Stop)
 
 	pr, pw := io.Pipe()

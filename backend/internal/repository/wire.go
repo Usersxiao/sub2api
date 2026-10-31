@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/Wei-Shaw/sub2api/ent"
@@ -80,7 +81,8 @@ var ProviderSet = wire.NewSet(
 	NewAnnouncementRepository,
 	NewAnnouncementReadRepository,
 	NewUsageLogRepository,
-	NewUsageBillingRepository,
+	NewUsageBillingRepositoryWithWriterAuthority,
+	NewUsageSettlementEventRepository,
 	NewBatchImageRepository,
 	NewGeminiCachedContentRepository,
 	NewIdempotencyRepository,
@@ -106,12 +108,13 @@ var ProviderSet = wire.NewSet(
 	NewChannelMonitorRequestTemplateRepository,
 	NewContentModerationRepository,
 	NewAffiliateRepository,
-	NewUserPlatformQuotaRepository,     // T14: user × platform quota
+	ProvideUserPlatformQuotaWriterAuthority,
+	NewUserPlatformQuotaRepositoryWithWriterAuthority,
 	NewUserPlatformQuotaServiceAdapter, // T14: adapter → service.UserPlatformQuotaRepository
 
 	// Cache implementations
 	NewGatewayCache,
-	NewBillingCache,
+	ProvideBillingCache,
 	NewAPIKeyCache,
 	NewTempUnschedCache,
 	NewTimeoutCounterCache,
@@ -138,6 +141,10 @@ var ProviderSet = wire.NewSet(
 	NewProxyLatencyCache,
 	NewTotpCache,
 	NewRefreshTokenCache,
+	NewAuthSessionRepository,
+	NewClientGatewayRepository,
+	NewClientInvocationLedgerRepository,
+	NewClientBillingIdentityRepository,
 	NewErrorPassthroughCache,
 	NewTLSFingerprintProfileCache,
 	NewChannelCache,
@@ -174,6 +181,29 @@ var ProviderSet = wire.NewSet(
 	ProvideSQLDB,
 	ProvideRedis,
 )
+
+// Resolve the persisted DB writer domain before constructing billing services.
+// A cache snapshot writer needs its own certified cache cohort and handoff;
+// starting a process with another configuration never establishes that proof.
+func ProvideUserPlatformQuotaWriterAuthority(db *sql.DB, cfg *config.Config) (service.UserPlatformQuotaWriterAuthority, error) {
+	var empty service.UserPlatformQuotaWriterAuthority
+	if cfg == nil {
+		return empty, service.ErrUserPlatformQuotaWriterUnavailable
+	}
+	if cfg.Database.UserPlatformQuotaFlusherEnabled {
+		return empty, service.ErrUserPlatformQuotaWriterModeUnsupported
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	authority, err := NewUserPlatformQuotaWriterAuthorityRepository(db).InitializeUserPlatformQuotaWriterAuthority(ctx, service.UserPlatformQuotaWriterModeDB)
+	if err != nil {
+		return empty, err
+	}
+	if err := service.ValidateUserPlatformQuotaWriterAuthority(authority); err != nil {
+		return empty, err
+	}
+	return authority, nil
+}
 
 // ProvideEnt 为依赖注入提供 Ent 客户端。
 //

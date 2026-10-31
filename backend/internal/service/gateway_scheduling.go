@@ -833,6 +833,15 @@ func (s *GatewayService) schedulingConfig() config.GatewaySchedulingConfig {
 	}
 }
 
+// DeferAccountSelectionSlot releases a scheduler-acquired slot and leaves the
+// selection ready for the existing handler to acquire after trusted counting.
+func (s *GatewayService) DeferAccountSelectionSlot(selection *AccountSelectionResult) error {
+	if s == nil {
+		return ErrClientInvocationAdmissionUnavailable
+	}
+	return deferAccountSelectionSlot(selection, s.schedulingConfig())
+}
+
 func (s *GatewayService) withGroupContext(ctx context.Context, group *Group) context.Context {
 	if !IsGroupContextValid(group) {
 		return ctx

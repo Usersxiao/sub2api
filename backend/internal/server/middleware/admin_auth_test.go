@@ -12,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -21,6 +22,7 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 
 	cfg := &config.Config{JWT: config.JWTConfig{Secret: "test-secret", ExpireHour: 1}}
 	authService := service.NewAuthService(nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	authService.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 
 	admin := &service.User{
 		ID:           1,
@@ -28,6 +30,7 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 		Role:         service.RoleAdmin,
 		Status:       service.StatusActive,
 		TokenVersion: 2,
+		SessionEpoch: 1,
 		Concurrency:  1,
 	}
 
@@ -53,7 +56,9 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 			ID:           admin.ID,
 			Email:        admin.Email,
 			Role:         admin.Role,
+			Status:       service.StatusActive,
 			TokenVersion: admin.TokenVersion - 1,
+			SessionEpoch: 1,
 		})
 		require.NoError(t, err)
 
@@ -71,7 +76,9 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 			ID:           admin.ID,
 			Email:        admin.Email,
 			Role:         admin.Role,
+			Status:       service.StatusActive,
 			TokenVersion: admin.TokenVersion,
+			SessionEpoch: 1,
 		})
 		require.NoError(t, err)
 
@@ -88,7 +95,9 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 			ID:           admin.ID,
 			Email:        admin.Email,
 			Role:         admin.Role,
+			Status:       service.StatusActive,
 			TokenVersion: admin.TokenVersion - 1,
+			SessionEpoch: 1,
 		})
 		require.NoError(t, err)
 
@@ -108,7 +117,9 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 			ID:           admin.ID,
 			Email:        admin.Email,
 			Role:         admin.Role,
+			Status:       service.StatusActive,
 			TokenVersion: admin.TokenVersion,
+			SessionEpoch: 1,
 		})
 		require.NoError(t, err)
 

@@ -257,7 +257,7 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 	accountID := account.ID
 	holdID := BatchImageHoldRequestID(batchID)
 	holdAmount := pricingSnapshot.HoldAmount
-	job, err := s.Repo.CreateBatchImageJob(ctx, CreateBatchImageJobParams{
+	job, err := s.Repo.CreateBatchImageJobWithBalanceHold(ctx, CreateBatchImageJobParams{
 		BatchID:                 batchID,
 		UserID:                  owner.UserID,
 		APIKeyID:                &apiKeyID,
@@ -285,15 +285,6 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 		SessionID:               normalized.SessionID,
 	})
 	if err != nil {
-		return nil, err
-	}
-	if err := reserveBatchImageBalanceHold(ctx, s.BillingRepo, job, requestHash); err != nil {
-		code := "BILLING_HOLD_FAILED"
-		if errors.Is(err, ErrBatchImageInsufficientBalance) {
-			code = "INSUFFICIENT_BALANCE"
-		}
-		_ = s.Repo.RecordBatchImageJobSubmitFailure(ctx, job.BatchID, code, sanitizeBatchImagePublicMessage(err.Error()), true)
-		s.hidePreUpstreamSubmitFailure(ctx, owner, job)
 		return nil, err
 	}
 	s.invalidateAuthCache(ctx, owner.UserID)

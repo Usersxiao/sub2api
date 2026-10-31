@@ -73,6 +73,34 @@ func (_c *APIKeyCreate) SetUserID(v int64) *APIKeyCreate {
 	return _c
 }
 
+// SetKind sets the "kind" field.
+func (_c *APIKeyCreate) SetKind(v string) *APIKeyCreate {
+	_c.mutation.SetKind(v)
+	return _c
+}
+
+// SetNillableKind sets the "kind" field if the given value is not nil.
+func (_c *APIKeyCreate) SetNillableKind(v *string) *APIKeyCreate {
+	if v != nil {
+		_c.SetKind(*v)
+	}
+	return _c
+}
+
+// SetClientConsumerID sets the "client_consumer_id" field.
+func (_c *APIKeyCreate) SetClientConsumerID(v string) *APIKeyCreate {
+	_c.mutation.SetClientConsumerID(v)
+	return _c
+}
+
+// SetNillableClientConsumerID sets the "client_consumer_id" field if the given value is not nil.
+func (_c *APIKeyCreate) SetNillableClientConsumerID(v *string) *APIKeyCreate {
+	if v != nil {
+		_c.SetClientConsumerID(*v)
+	}
+	return _c
+}
+
 // SetKey sets the "key" field.
 func (_c *APIKeyCreate) SetKey(v string) *APIKeyCreate {
 	_c.mutation.SetKey(v)
@@ -383,6 +411,10 @@ func (_c *APIKeyCreate) defaults() error {
 		v := apikey.DefaultUpdatedAt()
 		_c.mutation.SetUpdatedAt(v)
 	}
+	if _, ok := _c.mutation.Kind(); !ok {
+		v := apikey.DefaultKind
+		_c.mutation.SetKind(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := apikey.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -432,6 +464,19 @@ func (_c *APIKeyCreate) check() error {
 	}
 	if _, ok := _c.mutation.UserID(); !ok {
 		return &ValidationError{Name: "user_id", err: errors.New(`ent: missing required field "APIKey.user_id"`)}
+	}
+	if _, ok := _c.mutation.Kind(); !ok {
+		return &ValidationError{Name: "kind", err: errors.New(`ent: missing required field "APIKey.kind"`)}
+	}
+	if v, ok := _c.mutation.Kind(); ok {
+		if err := apikey.KindValidator(v); err != nil {
+			return &ValidationError{Name: "kind", err: fmt.Errorf(`ent: validator failed for field "APIKey.kind": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.ClientConsumerID(); ok {
+		if err := apikey.ClientConsumerIDValidator(v); err != nil {
+			return &ValidationError{Name: "client_consumer_id", err: fmt.Errorf(`ent: validator failed for field "APIKey.client_consumer_id": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.Key(); !ok {
 		return &ValidationError{Name: "key", err: errors.New(`ent: missing required field "APIKey.key"`)}
@@ -522,6 +567,14 @@ func (_c *APIKeyCreate) createSpec() (*APIKey, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DeletedAt(); ok {
 		_spec.SetField(apikey.FieldDeletedAt, field.TypeTime, value)
 		_node.DeletedAt = &value
+	}
+	if value, ok := _c.mutation.Kind(); ok {
+		_spec.SetField(apikey.FieldKind, field.TypeString, value)
+		_node.Kind = value
+	}
+	if value, ok := _c.mutation.ClientConsumerID(); ok {
+		_spec.SetField(apikey.FieldClientConsumerID, field.TypeString, value)
+		_node.ClientConsumerID = &value
 	}
 	if value, ok := _c.mutation.Key(); ok {
 		_spec.SetField(apikey.FieldKey, field.TypeString, value)
@@ -736,6 +789,36 @@ func (u *APIKeyUpsert) SetUserID(v int64) *APIKeyUpsert {
 // UpdateUserID sets the "user_id" field to the value that was provided on create.
 func (u *APIKeyUpsert) UpdateUserID() *APIKeyUpsert {
 	u.SetExcluded(apikey.FieldUserID)
+	return u
+}
+
+// SetKind sets the "kind" field.
+func (u *APIKeyUpsert) SetKind(v string) *APIKeyUpsert {
+	u.Set(apikey.FieldKind, v)
+	return u
+}
+
+// UpdateKind sets the "kind" field to the value that was provided on create.
+func (u *APIKeyUpsert) UpdateKind() *APIKeyUpsert {
+	u.SetExcluded(apikey.FieldKind)
+	return u
+}
+
+// SetClientConsumerID sets the "client_consumer_id" field.
+func (u *APIKeyUpsert) SetClientConsumerID(v string) *APIKeyUpsert {
+	u.Set(apikey.FieldClientConsumerID, v)
+	return u
+}
+
+// UpdateClientConsumerID sets the "client_consumer_id" field to the value that was provided on create.
+func (u *APIKeyUpsert) UpdateClientConsumerID() *APIKeyUpsert {
+	u.SetExcluded(apikey.FieldClientConsumerID)
+	return u
+}
+
+// ClearClientConsumerID clears the value of the "client_consumer_id" field.
+func (u *APIKeyUpsert) ClearClientConsumerID() *APIKeyUpsert {
+	u.SetNull(apikey.FieldClientConsumerID)
 	return u
 }
 
@@ -1154,6 +1237,41 @@ func (u *APIKeyUpsertOne) SetUserID(v int64) *APIKeyUpsertOne {
 func (u *APIKeyUpsertOne) UpdateUserID() *APIKeyUpsertOne {
 	return u.Update(func(s *APIKeyUpsert) {
 		s.UpdateUserID()
+	})
+}
+
+// SetKind sets the "kind" field.
+func (u *APIKeyUpsertOne) SetKind(v string) *APIKeyUpsertOne {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.SetKind(v)
+	})
+}
+
+// UpdateKind sets the "kind" field to the value that was provided on create.
+func (u *APIKeyUpsertOne) UpdateKind() *APIKeyUpsertOne {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.UpdateKind()
+	})
+}
+
+// SetClientConsumerID sets the "client_consumer_id" field.
+func (u *APIKeyUpsertOne) SetClientConsumerID(v string) *APIKeyUpsertOne {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.SetClientConsumerID(v)
+	})
+}
+
+// UpdateClientConsumerID sets the "client_consumer_id" field to the value that was provided on create.
+func (u *APIKeyUpsertOne) UpdateClientConsumerID() *APIKeyUpsertOne {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.UpdateClientConsumerID()
+	})
+}
+
+// ClearClientConsumerID clears the value of the "client_consumer_id" field.
+func (u *APIKeyUpsertOne) ClearClientConsumerID() *APIKeyUpsertOne {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.ClearClientConsumerID()
 	})
 }
 
@@ -1792,6 +1910,41 @@ func (u *APIKeyUpsertBulk) SetUserID(v int64) *APIKeyUpsertBulk {
 func (u *APIKeyUpsertBulk) UpdateUserID() *APIKeyUpsertBulk {
 	return u.Update(func(s *APIKeyUpsert) {
 		s.UpdateUserID()
+	})
+}
+
+// SetKind sets the "kind" field.
+func (u *APIKeyUpsertBulk) SetKind(v string) *APIKeyUpsertBulk {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.SetKind(v)
+	})
+}
+
+// UpdateKind sets the "kind" field to the value that was provided on create.
+func (u *APIKeyUpsertBulk) UpdateKind() *APIKeyUpsertBulk {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.UpdateKind()
+	})
+}
+
+// SetClientConsumerID sets the "client_consumer_id" field.
+func (u *APIKeyUpsertBulk) SetClientConsumerID(v string) *APIKeyUpsertBulk {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.SetClientConsumerID(v)
+	})
+}
+
+// UpdateClientConsumerID sets the "client_consumer_id" field to the value that was provided on create.
+func (u *APIKeyUpsertBulk) UpdateClientConsumerID() *APIKeyUpsertBulk {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.UpdateClientConsumerID()
+	})
+}
+
+// ClearClientConsumerID clears the value of the "client_consumer_id" field.
+func (u *APIKeyUpsertBulk) ClearClientConsumerID() *APIKeyUpsertBulk {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.ClearClientConsumerID()
 	})
 }
 

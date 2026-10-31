@@ -114,6 +114,8 @@ type APIKeyMutation struct {
 	created_at         *time.Time
 	updated_at         *time.Time
 	deleted_at         *time.Time
+	kind               *string
+	client_consumer_id *string
 	key                *string
 	name               *string
 	status             *string
@@ -408,6 +410,91 @@ func (m *APIKeyMutation) OldUserID(ctx context.Context) (v int64, err error) {
 // ResetUserID resets all changes to the "user_id" field.
 func (m *APIKeyMutation) ResetUserID() {
 	m.user = nil
+}
+
+// SetKind sets the "kind" field.
+func (m *APIKeyMutation) SetKind(s string) {
+	m.kind = &s
+}
+
+// Kind returns the value of the "kind" field in the mutation.
+func (m *APIKeyMutation) Kind() (r string, exists bool) {
+	v := m.kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKind returns the old "kind" field's value of the APIKey entity.
+// If the APIKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *APIKeyMutation) OldKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKind: %w", err)
+	}
+	return oldValue.Kind, nil
+}
+
+// ResetKind resets all changes to the "kind" field.
+func (m *APIKeyMutation) ResetKind() {
+	m.kind = nil
+}
+
+// SetClientConsumerID sets the "client_consumer_id" field.
+func (m *APIKeyMutation) SetClientConsumerID(s string) {
+	m.client_consumer_id = &s
+}
+
+// ClientConsumerID returns the value of the "client_consumer_id" field in the mutation.
+func (m *APIKeyMutation) ClientConsumerID() (r string, exists bool) {
+	v := m.client_consumer_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldClientConsumerID returns the old "client_consumer_id" field's value of the APIKey entity.
+// If the APIKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *APIKeyMutation) OldClientConsumerID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldClientConsumerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldClientConsumerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldClientConsumerID: %w", err)
+	}
+	return oldValue.ClientConsumerID, nil
+}
+
+// ClearClientConsumerID clears the value of the "client_consumer_id" field.
+func (m *APIKeyMutation) ClearClientConsumerID() {
+	m.client_consumer_id = nil
+	m.clearedFields[apikey.FieldClientConsumerID] = struct{}{}
+}
+
+// ClientConsumerIDCleared returns if the "client_consumer_id" field was cleared in this mutation.
+func (m *APIKeyMutation) ClientConsumerIDCleared() bool {
+	_, ok := m.clearedFields[apikey.FieldClientConsumerID]
+	return ok
+}
+
+// ResetClientConsumerID resets all changes to the "client_consumer_id" field.
+func (m *APIKeyMutation) ResetClientConsumerID() {
+	m.client_consumer_id = nil
+	delete(m.clearedFields, apikey.FieldClientConsumerID)
 }
 
 // SetKey sets the "key" field.
@@ -1532,7 +1619,7 @@ func (m *APIKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *APIKeyMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 25)
 	if m.created_at != nil {
 		fields = append(fields, apikey.FieldCreatedAt)
 	}
@@ -1544,6 +1631,12 @@ func (m *APIKeyMutation) Fields() []string {
 	}
 	if m.user != nil {
 		fields = append(fields, apikey.FieldUserID)
+	}
+	if m.kind != nil {
+		fields = append(fields, apikey.FieldKind)
+	}
+	if m.client_consumer_id != nil {
+		fields = append(fields, apikey.FieldClientConsumerID)
 	}
 	if m.key != nil {
 		fields = append(fields, apikey.FieldKey)
@@ -1618,6 +1711,10 @@ func (m *APIKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.DeletedAt()
 	case apikey.FieldUserID:
 		return m.UserID()
+	case apikey.FieldKind:
+		return m.Kind()
+	case apikey.FieldClientConsumerID:
+		return m.ClientConsumerID()
 	case apikey.FieldKey:
 		return m.Key()
 	case apikey.FieldName:
@@ -1673,6 +1770,10 @@ func (m *APIKeyMutation) OldField(ctx context.Context, name string) (ent.Value, 
 		return m.OldDeletedAt(ctx)
 	case apikey.FieldUserID:
 		return m.OldUserID(ctx)
+	case apikey.FieldKind:
+		return m.OldKind(ctx)
+	case apikey.FieldClientConsumerID:
+		return m.OldClientConsumerID(ctx)
 	case apikey.FieldKey:
 		return m.OldKey(ctx)
 	case apikey.FieldName:
@@ -1747,6 +1848,20 @@ func (m *APIKeyMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetUserID(v)
+		return nil
+	case apikey.FieldKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKind(v)
+		return nil
+	case apikey.FieldClientConsumerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetClientConsumerID(v)
 		return nil
 	case apikey.FieldKey:
 		v, ok := value.(string)
@@ -2013,6 +2128,9 @@ func (m *APIKeyMutation) ClearedFields() []string {
 	if m.FieldCleared(apikey.FieldDeletedAt) {
 		fields = append(fields, apikey.FieldDeletedAt)
 	}
+	if m.FieldCleared(apikey.FieldClientConsumerID) {
+		fields = append(fields, apikey.FieldClientConsumerID)
+	}
 	if m.FieldCleared(apikey.FieldGroupID) {
 		fields = append(fields, apikey.FieldGroupID)
 	}
@@ -2053,6 +2171,9 @@ func (m *APIKeyMutation) ClearField(name string) error {
 	switch name {
 	case apikey.FieldDeletedAt:
 		m.ClearDeletedAt()
+		return nil
+	case apikey.FieldClientConsumerID:
+		m.ClearClientConsumerID()
 		return nil
 	case apikey.FieldGroupID:
 		m.ClearGroupID()
@@ -2097,6 +2218,12 @@ func (m *APIKeyMutation) ResetField(name string) error {
 		return nil
 	case apikey.FieldUserID:
 		m.ResetUserID()
+		return nil
+	case apikey.FieldKind:
+		m.ResetKind()
+		return nil
+	case apikey.FieldClientConsumerID:
+		m.ResetClientConsumerID()
 		return nil
 	case apikey.FieldKey:
 		m.ResetKey()
@@ -48846,6 +48973,8 @@ type UserMutation struct {
 	deleted_at                    *time.Time
 	email                         *string
 	password_hash                 *string
+	session_epoch                 *int64
+	addsession_epoch              *int64
 	role                          *string
 	balance                       *float64
 	addbalance                    *float64
@@ -49206,6 +49335,62 @@ func (m *UserMutation) OldPasswordHash(ctx context.Context) (v string, err error
 // ResetPasswordHash resets all changes to the "password_hash" field.
 func (m *UserMutation) ResetPasswordHash() {
 	m.password_hash = nil
+}
+
+// SetSessionEpoch sets the "session_epoch" field.
+func (m *UserMutation) SetSessionEpoch(i int64) {
+	m.session_epoch = &i
+	m.addsession_epoch = nil
+}
+
+// SessionEpoch returns the value of the "session_epoch" field in the mutation.
+func (m *UserMutation) SessionEpoch() (r int64, exists bool) {
+	v := m.session_epoch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionEpoch returns the old "session_epoch" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldSessionEpoch(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionEpoch is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionEpoch requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionEpoch: %w", err)
+	}
+	return oldValue.SessionEpoch, nil
+}
+
+// AddSessionEpoch adds i to the "session_epoch" field.
+func (m *UserMutation) AddSessionEpoch(i int64) {
+	if m.addsession_epoch != nil {
+		*m.addsession_epoch += i
+	} else {
+		m.addsession_epoch = &i
+	}
+}
+
+// AddedSessionEpoch returns the value that was added to the "session_epoch" field in this mutation.
+func (m *UserMutation) AddedSessionEpoch() (r int64, exists bool) {
+	v := m.addsession_epoch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSessionEpoch resets all changes to the "session_epoch" field.
+func (m *UserMutation) ResetSessionEpoch() {
+	m.session_epoch = nil
+	m.addsession_epoch = nil
 }
 
 // SetRole sets the "role" field.
@@ -50850,7 +51035,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 25)
+	fields := make([]string, 0, 26)
 	if m.created_at != nil {
 		fields = append(fields, user.FieldCreatedAt)
 	}
@@ -50865,6 +51050,9 @@ func (m *UserMutation) Fields() []string {
 	}
 	if m.password_hash != nil {
 		fields = append(fields, user.FieldPasswordHash)
+	}
+	if m.session_epoch != nil {
+		fields = append(fields, user.FieldSessionEpoch)
 	}
 	if m.role != nil {
 		fields = append(fields, user.FieldRole)
@@ -50944,6 +51132,8 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.Email()
 	case user.FieldPasswordHash:
 		return m.PasswordHash()
+	case user.FieldSessionEpoch:
+		return m.SessionEpoch()
 	case user.FieldRole:
 		return m.Role()
 	case user.FieldBalance:
@@ -51003,6 +51193,8 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldEmail(ctx)
 	case user.FieldPasswordHash:
 		return m.OldPasswordHash(ctx)
+	case user.FieldSessionEpoch:
+		return m.OldSessionEpoch(ctx)
 	case user.FieldRole:
 		return m.OldRole(ctx)
 	case user.FieldBalance:
@@ -51086,6 +51278,13 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetPasswordHash(v)
+		return nil
+	case user.FieldSessionEpoch:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionEpoch(v)
 		return nil
 	case user.FieldRole:
 		v, ok := value.(string)
@@ -51235,6 +51434,9 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 // this mutation.
 func (m *UserMutation) AddedFields() []string {
 	var fields []string
+	if m.addsession_epoch != nil {
+		fields = append(fields, user.FieldSessionEpoch)
+	}
 	if m.addbalance != nil {
 		fields = append(fields, user.FieldBalance)
 	}
@@ -51261,6 +51463,8 @@ func (m *UserMutation) AddedFields() []string {
 // was not set, or was not defined in the schema.
 func (m *UserMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
+	case user.FieldSessionEpoch:
+		return m.AddedSessionEpoch()
 	case user.FieldBalance:
 		return m.AddedBalance()
 	case user.FieldFrozenBalance:
@@ -51282,6 +51486,13 @@ func (m *UserMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *UserMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case user.FieldSessionEpoch:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSessionEpoch(v)
+		return nil
 	case user.FieldBalance:
 		v, ok := value.(float64)
 		if !ok {
@@ -51404,6 +51615,9 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldPasswordHash:
 		m.ResetPasswordHash()
+		return nil
+	case user.FieldSessionEpoch:
+		m.ResetSessionEpoch()
 		return nil
 	case user.FieldRole:
 		m.ResetRole()

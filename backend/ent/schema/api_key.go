@@ -34,6 +34,9 @@ func (APIKey) Mixin() []ent.Mixin {
 func (APIKey) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("user_id"),
+		// Internal consumption rows retain the legacy billing FK without being credentials.
+		field.String("kind").MaxLen(32).Default("api_key"),
+		field.String("client_consumer_id").MaxLen(128).Optional().Nillable(),
 		field.String("key").
 			MaxLen(128).
 			NotEmpty().

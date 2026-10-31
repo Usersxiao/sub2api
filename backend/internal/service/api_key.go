@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
@@ -8,6 +9,9 @@ import (
 
 // API Key status constants
 const (
+	APIKeyKindCredential       = "api_key"
+	APIKeyKindClientConsumer   = "client_consumer"
+	InternalAPIKeyPrefix       = "internal:"
 	StatusAPIKeyActive         = "active"
 	StatusAPIKeyDisabled       = "disabled"
 	StatusAPIKeyQuotaExhausted = "quota_exhausted"
@@ -28,14 +32,16 @@ func IsWindowExpired(windowStart *time.Time, duration time.Duration) bool {
 }
 
 type APIKey struct {
-	ID          int64
-	UserID      int64
-	Key         string
-	Name        string
-	GroupID     *int64
-	Status      string
-	IPWhitelist []string
-	IPBlacklist []string
+	ID               int64
+	Kind             string
+	ClientConsumerID *string
+	UserID           int64
+	Key              string
+	Name             string
+	GroupID          *int64
+	Status           string
+	IPWhitelist      []string
+	IPBlacklist      []string
 	// 预编译的 IP 规则，用于认证热路径避免重复 ParseIP/ParseCIDR。
 	CompiledIPWhitelist *ip.CompiledIPRules `json:"-"`
 	CompiledIPBlacklist *ip.CompiledIPRules `json:"-"`
@@ -62,6 +68,16 @@ type APIKey struct {
 	Window5hStart *time.Time // Start of current 5h window
 	Window1dStart *time.Time // Start of current 1d window
 	Window7dStart *time.Time // Start of current 7d window
+}
+
+// IsClientConsumer identifies a server-owned accounting row, not a bearer credential.
+func (k *APIKey) IsClientConsumer() bool { return k != nil && k.Kind == APIKeyKindClientConsumer }
+
+// IsCredential allows legacy in-memory credential values with an empty Kind,
+// while rejecting internal or malformed accounting projections at boundaries.
+func (k *APIKey) IsCredential() bool {
+	return k != nil && (k.Kind == "" || k.Kind == APIKeyKindCredential) &&
+		k.ClientConsumerID == nil && !strings.HasPrefix(k.Key, InternalAPIKeyPrefix)
 }
 
 func (k *APIKey) IsActive() bool {

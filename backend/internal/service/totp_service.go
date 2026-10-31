@@ -63,6 +63,7 @@ type TotpSetupSession struct {
 // TotpLoginSession represents a pending 2FA login session
 type TotpLoginSession struct {
 	UserID           int64
+	SessionEpoch     int64 `json:"session_epoch"`
 	Email            string
 	TokenExpiry      time.Time
 	PendingOAuthBind *PendingOAuthBindLoginSession `json:"pending_oauth_bind,omitempty"`
@@ -421,8 +422,8 @@ func (s *TotpService) HasStepUpGrant(ctx context.Context, userID int64, sessionK
 }
 
 // CreateLoginSession creates a temporary login session for 2FA
-func (s *TotpService) CreateLoginSession(ctx context.Context, userID int64, email string) (string, error) {
-	return s.createLoginSession(ctx, userID, email, nil)
+func (s *TotpService) CreateLoginSession(ctx context.Context, userID int64, email string, sessionEpoch int64) (string, error) {
+	return s.createLoginSession(ctx, userID, email, sessionEpoch, nil)
 }
 
 // CreatePendingOAuthBindLoginSession creates a temporary 2FA session that will
@@ -433,8 +434,9 @@ func (s *TotpService) CreatePendingOAuthBindLoginSession(
 	email string,
 	pendingSessionToken string,
 	browserSessionKey string,
+	sessionEpoch int64,
 ) (string, error) {
-	return s.createLoginSession(ctx, userID, email, &PendingOAuthBindLoginSession{
+	return s.createLoginSession(ctx, userID, email, sessionEpoch, &PendingOAuthBindLoginSession{
 		PendingSessionToken: pendingSessionToken,
 		BrowserSessionKey:   browserSessionKey,
 	})
@@ -444,8 +446,12 @@ func (s *TotpService) createLoginSession(
 	ctx context.Context,
 	userID int64,
 	email string,
+	sessionEpoch int64,
 	pendingOAuthBind *PendingOAuthBindLoginSession,
 ) (string, error) {
+	if sessionEpoch <= 0 {
+		return "", ErrTokenRevoked
+	}
 	// Generate a random temp token
 	tempToken, err := generateRandomToken(32)
 	if err != nil {
@@ -454,6 +460,7 @@ func (s *TotpService) createLoginSession(
 
 	session := &TotpLoginSession{
 		UserID:           userID,
+		SessionEpoch:     sessionEpoch,
 		Email:            email,
 		TokenExpiry:      time.Now().Add(totpLoginTTL),
 		PendingOAuthBind: pendingOAuthBind,

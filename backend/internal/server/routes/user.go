@@ -8,6 +8,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// RegisterClientInvocationRoutes exposes the restricted-grant boundary without
+// JWT middleware. The handler fails closed unless client_invocation.enabled
+// supplied the production composition; the GET is the original-identity
+// recovery query and never dispatches.
+func RegisterClientInvocationRoutes(v1 *gin.RouterGroup, h *handler.Handlers) {
+	if v1 == nil || h == nil || h.ClientInvocation == nil {
+		return
+	}
+	v1.POST("/client/invoke/:route_id", h.ClientInvocation.Invoke)
+	v1.GET("/client/invocations/:project_id/:request_id", h.ClientInvocation.GetInvocation)
+}
+
 // RegisterUserRoutes 注册用户相关路由（需要认证）
 func RegisterUserRoutes(
 	v1 *gin.RouterGroup,
@@ -20,11 +32,26 @@ func RegisterUserRoutes(
 	authenticated := v1.Group("")
 	authenticated.Use(gin.HandlerFunc(jwtAuth))
 	authenticated.Use(middleware.BackendModeUserGuard(settingService))
+	// Session proofs accompany local capability traffic and have their own
+	// bounded bucket. Register before the panel-wide middleware is attached;
+	// JWT, backend mode and audit checks remain the same as other user routes.
+	if h.ClientConfiguration != nil {
+		authenticated.GET("/client/session", panelRateLimiter.ClientSession(), gin.HandlerFunc(auditLog), h.ClientConfiguration.GetSession)
+	}
 	// 面板全局按用户限流：防止单个账号高频刷接口打爆数据库
 	authenticated.Use(panelRateLimiter.Global())
 	// 用户管理面变更类操作入审计（含 TOTP 启用/禁用、step-up 验证、密码修改等安全事件）
 	authenticated.Use(gin.HandlerFunc(auditLog))
 	{
+		if h.ClientConfiguration != nil {
+			authenticated.GET("/client/configuration", h.ClientConfiguration.GetConfiguration)
+			authenticated.GET("/client/sessions", h.ClientConfiguration.ListSessions)
+			authenticated.POST("/client/sessions/revoke", h.ClientConfiguration.RevokeSessions)
+			authenticated.DELETE("/client/sessions/:sid", h.ClientConfiguration.RevokeDeviceSession)
+			authenticated.POST("/client/gateway-session", h.ClientConfiguration.CreateGatewaySession)
+			authenticated.POST("/client/gateway-session/revoke", h.ClientConfiguration.RevokeGatewaySession)
+		}
+
 		// 用户接口
 		user := authenticated.Group("/user")
 		{

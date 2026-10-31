@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -103,6 +104,39 @@ func TestOpenAIGatewayPluginRoutingPreservesAPIKeyAndFailsClosedForOAuth(t *test
 	assert.Nil(t, oauthResponse)
 	assert.Contains(t, err.Error(), "插件不可用")
 	assert.Equal(t, 1, upstream.doCalls)
+}
+
+func TestOpenAIGatewayGatedInvocationBypassesExternalOAuthTransport(t *testing.T) {
+	manager := &PluginManager{}
+	manager.route.Store(&pluginRoute{pluginID: 1, rolloutPercent: 100, unavailable: "测试不可用"})
+	upstream := &pluginRoutingHTTPUpstream{}
+	service := &OpenAIGatewayService{pluginManager: manager, httpUpstream: upstream}
+	payload := []byte(`{"model":"gpt-5.4","max_output_tokens":64}`)
+	authorizerCalls := 0
+	ctx := WithClientInvocationProviderPayloadAuthorizer(context.Background(), clientInvocationProviderPayloadAuthorizerFunc(func(_ context.Context, accountID int64, endpoint string, body []byte) error {
+		authorizerCalls++
+		assert.Equal(t, int64(2), accountID)
+		assert.Equal(t, "/v1/responses", endpoint)
+		assert.Equal(t, payload, body)
+		return nil
+	}))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/responses", bytes.NewReader(payload))
+	require.NoError(t, err)
+	account := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1}
+
+	response, err := service.doOpenAIUpstream(request, "", account)
+
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	_ = response.Body.Close()
+	assert.Equal(t, 1, authorizerCalls)
+	assert.Equal(t, 1, upstream.doCalls)
+	assert.Equal(t, 0, upstream.doWithTLSCalls)
+	assert.Nil(t, request.GetBody)
+	assert.True(t, HTTPUpstreamRedirectsDisabled(request.Context()))
+	body, err := io.ReadAll(request.Body)
+	require.NoError(t, err)
+	assert.Equal(t, payload, body)
 }
 
 func TestStablePluginBucketIsDeterministicAndBounded(t *testing.T) {

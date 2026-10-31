@@ -54,6 +54,9 @@ func TestBatchImageMVPFlow(t *testing.T) {
 		BillingRepo:      billing,
 		Config:           cfg,
 	}
+	repo.nativeCreateHook = func(ctx context.Context, params CreateBatchImageJobParams) error {
+		return fakeBatchImageNativeReserve(ctx, params, publicSvc.BillingRepo)
+	}
 	processor := &BatchImagePipelineProcessor{
 		ProviderProcessor: &BatchImageProviderProcessor{
 			Repo:             repo,

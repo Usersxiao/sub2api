@@ -3,6 +3,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -26,6 +28,7 @@ func TestAuthHandlerRevokeAllSessionsInvalidatesAccessTokens(t *testing.T) {
 			Role:         service.RoleUser,
 			Status:       service.StatusActive,
 			TokenVersion: 7,
+			SessionEpoch: 1,
 		},
 	}
 	refreshTokenCache := &userHandlerRefreshTokenCacheStub{}
@@ -36,6 +39,11 @@ func TestAuthHandlerRevokeAllSessionsInvalidatesAccessTokens(t *testing.T) {
 		},
 	}
 	authService := service.NewAuthService(nil, repo, nil, refreshTokenCache, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	authService.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
+	token, err := authService.GenerateToken(context.Background(), repo.user)
+	require.NoError(t, err)
+	claims, err := authService.ValidateToken(token)
+	require.NoError(t, err)
 	handler := &AuthHandler{authService: authService}
 
 	recorder := httptest.NewRecorder()
@@ -46,11 +54,8 @@ func TestAuthHandlerRevokeAllSessionsInvalidatesAccessTokens(t *testing.T) {
 	handler.RevokeAllSessions(c)
 
 	require.Equal(t, http.StatusOK, recorder.Code)
-	require.Equal(t, []int64{29}, refreshTokenCache.revokedUserIDs)
-	// users 表没有 token_version 列（见 resolvedTokenVersion：JWT 里的值由
-	// email+password_hash 指纹推导），所以自增 TokenVersion 只停留在内存里。
-	// 此前紧跟其后的整行 Update 不写任何有效数据，却会用旧快照覆盖并发写入的列，
-	// 已移除。会话撤销由上面的 refresh session 清理承担。
+	require.ErrorIs(t, authService.ValidateActiveSession(context.Background(), claims), service.ErrTokenRevoked)
+	// Epoch revocation does not rewrite the user's unrelated profile fields.
 	require.Equal(t, int64(7), repo.user.TokenVersion)
 
 	var resp struct {

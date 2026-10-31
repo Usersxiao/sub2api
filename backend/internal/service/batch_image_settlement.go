@@ -150,6 +150,17 @@ func (s *BatchImageSettlementService) Settle(ctx context.Context, batchID string
 	}
 
 	if err := captureBatchImageBalanceHold(ctx, s.BillingRepo, job, actualCost, manifestHash); err != nil {
+		// A conflicting capture can already have committed a financial effect.
+		// Do not turn this ambiguity into retry exhaustion and release its hold.
+		if errors.Is(err, ErrUsageBillingRequestConflict) ||
+			errors.Is(err, ErrBatchImageBalanceLifecycleConflict) ||
+			errors.Is(err, ErrBatchImageBalanceLifecycleHistory) ||
+			errors.Is(err, ErrBatchImageBalanceLifecycleInput) ||
+			errors.Is(err, ErrBatchImageNativeBirthConflict) ||
+			errors.Is(err, ErrBatchImageNativeBirthHistory) ||
+			errors.Is(err, ErrBatchImageNativeBirthInput) {
+			return nil, err
+		}
 		msg := truncateBatchImageMessage(err.Error(), batchImageMaxErrorMessageLength)
 		if failErr := s.recordSettlementFailure(ctx, job, "SETTLEMENT_BILLING_FAILED", msg); failErr != nil {
 			return nil, failErr

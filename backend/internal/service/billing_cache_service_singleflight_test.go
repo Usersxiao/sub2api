@@ -79,8 +79,8 @@ func (s *billingCacheMissStub) DeleteUserPlatformQuotaCache(ctx context.Context,
 	return nil
 }
 
-func (s *billingCacheMissStub) IncrUserPlatformQuotaUsageCache(ctx context.Context, userID int64, platform string, cost float64, ttl time.Duration, markDirty bool) error {
-	return nil
+func (s *billingCacheMissStub) IncrUserPlatformQuotaUsageCache(ctx context.Context, userID int64, platform string, cost float64, ttl time.Duration, markDirty bool) (UserPlatformQuotaIncrementResult, error) {
+	return UserPlatformQuotaIncrementResult{Status: QuotaIncrementApplied}, nil
 }
 
 func (s *billingCacheMissStub) PopDirtyUserPlatformQuotaKeys(ctx context.Context, n int) ([]UserPlatformQuotaKey, error) {

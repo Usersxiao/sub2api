@@ -41,7 +41,7 @@ type FlusherMetrics struct {
 const flusherMaxBatchesPerTick = 16
 
 // maxFlushBatchSize 限制单批行数,必须 ≤ repository.BatchSnapshotUsage 的 batchRows(6000),
-// 以保证单次 flush 的 snapshots 仅生成一条 UPSERT(单事务原子)。两处需手动保持一致。
+// 以保证单次 flush 的 snapshots 仅生成一条 UPDATE(单事务原子)。两处需手动保持一致。
 const maxFlushBatchSize = 6000
 
 // defaultFlushBatchSize 是配置 flush_batch_size 非法(≤0)时的回退值。
@@ -143,8 +143,10 @@ func (s *UserPlatformQuotaUsageFlusher) flushOneBatch(parentCtx context.Context)
 		return false
 	}
 
-	// 3. 组装 snapshots（MISS 或任一 WindowStart==nil → 跳过）
+	// 3. Only DB-stamped entries can become snapshots. Older V1 entries and no-row
+	// sentinels retain their admission behavior but never write by (user,platform).
 	snaps := make([]UserPlatformQuotaSnapshot, 0, len(keys))
+	snapshotKeys := make([]UserPlatformQuotaKey, 0, len(keys))
 	for i, key := range keys {
 		e := entries[i]
 		if e == nil {
@@ -153,7 +155,12 @@ func (s *UserPlatformQuotaUsageFlusher) flushOneBatch(parentCtx context.Context)
 		if e.DailyWindowStart == nil || e.WeeklyWindowStart == nil || e.MonthlyWindowStart == nil {
 			continue
 		}
+		if e.SchemaVersion != UserPlatformQuotaCacheSchemaV1 || e.QuotaRowID <= 0 || e.ControlGeneration <= 0 {
+			continue
+		}
 		snaps = append(snaps, UserPlatformQuotaSnapshot{
+			QuotaRowID:         e.QuotaRowID,
+			ControlGeneration:  e.ControlGeneration,
 			UserID:             key.UserID,
 			Platform:           key.Platform,
 			DailyUsageUSD:      e.DailyUsageUSD,
@@ -163,6 +170,7 @@ func (s *UserPlatformQuotaUsageFlusher) flushOneBatch(parentCtx context.Context)
 			WeeklyWindowStart:  *e.WeeklyWindowStart,
 			MonthlyWindowStart: *e.MonthlyWindowStart,
 		})
+		snapshotKeys = append(snapshotKeys, key)
 	}
 
 	// 4. 全部 MISS/异常跳过时
@@ -175,17 +183,12 @@ func (s *UserPlatformQuotaUsageFlusher) flushOneBatch(parentCtx context.Context)
 		return true
 	}
 
-	// 已知竞态(admin 写 × flusher 刷,仅 flusher_enabled=true 时存在):
-	// admin ResetExpiredWindow/UpsertForUser 是"先写 DB 再 DeleteCache"。若本批已 SPOP + BatchGet
-	// 读到旧 usage 快照(此刻 member 已离开脏集),而 admin 随后写 DB、本行 UPSERT 又在 admin 写之后落库,
-	// 则旧快照会覆盖 admin 刚写入的值;DeleteCache 后 Redis MISS,下次 preflight 从 DB 重载被覆盖的旧值。
-	// 因 member 已被 SPOP,admin 侧 SREM/清脏标记无法拦截本批(故未做)。影响有限,暂列为已知取舍:
-	//   - UpsertForUser 改 limit,而本 UPDATE 只写既有活跃行的 usage/window 列 → limit 配置不受影响,
-	//     被软删的行不会被本 UPDATE 复活或重建;
-	//   - ResetExpiredWindow 改 usage,但 preflight windowExpired 会在窗口真正过期时自愈重置,
-	//     仅"强制重置未过期窗口"且与本批精确交错时短暂失效;
-	//   - 低频 admin 操作 + 默认 flusher_enabled=false。彻底消除需 version OCC(DB 加 version 列条件 UPSERT),
-	//     成本高;启用 flusher 后如需强一致再评估。
+	// The DB compares row identity and control generation atomically with UPDATE.
+	// A snapshot read before an administrator reset/configuration change or row
+	// replacement becomes a successful no-op, so it must not be re-added forever.
+	// This fence does not order snapshots within one generation or certify Redis
+	// cache reads/fills, and older binaries still issue unfenced SQL. Version
+	// remains an independent Redis usage revision.
 
 	// 5. 写入 DB
 	start := time.Now()
@@ -203,7 +206,7 @@ func (s *UserPlatformQuotaUsageFlusher) flushOneBatch(parentCtx context.Context)
 		} else {
 			// 其他错误：回填脏集，保留下次重试
 			s.metrics.FlushErrorTotal.Add(1)
-			s.readdOrCountLost(ctx, keys, "BatchSnapshotUsage")
+			s.readdOrCountLost(ctx, snapshotKeys, "BatchSnapshotUsage")
 			logger.LegacyPrintf("quota_flusher", "[QuotaFlusher] BatchSnapshotUsage error: %v", writeErr)
 		}
 		return false
@@ -255,9 +258,10 @@ func (s *UserPlatformQuotaUsageFlusher) Start() {
 	s.timingWheel.ScheduleRecurring("deferred:platform_quota", s.interval, s.tick)
 }
 
-// Stop 停止 flusher：标记 stopped → Cancel 定时器 → 执行最后一次 flush。
+// Stop 停止已启用的 flusher：标记 stopped → Cancel 定时器 → 执行最后一次 flush。
+// Disabled mode never owns Redis snapshots, including dirty keys from an older run.
 func (s *UserPlatformQuotaUsageFlusher) Stop() {
-	if s == nil {
+	if s == nil || !s.enabled {
 		return
 	}
 	s.stopped.Store(true)

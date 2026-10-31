@@ -3,10 +3,13 @@ package handler
 import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/google/wire"
+	"go.uber.org/zap"
 )
 
 // ProvideAdminHandlers creates the AdminHandlers struct
@@ -181,6 +184,8 @@ func ProvideAdminSettingHandler(settingService *service.SettingService, emailSer
 
 // ProvideHandlers creates the Handlers struct
 func ProvideHandlers(
+	clientConfigurationHandler *ClientConfigurationHandler,
+	clientInvocationHandler *ClientInvocationHandler,
 	authHandler *AuthHandler,
 	userHandler *UserHandler,
 	apiKeyHandler *APIKeyHandler,
@@ -208,33 +213,37 @@ func ProvideHandlers(
 	_ *service.OpenAIQuotaAutoResetService,
 ) *Handlers {
 	return &Handlers{
-		Auth:             authHandler,
-		User:             userHandler,
-		APIKey:           apiKeyHandler,
-		Usage:            usageHandler,
-		Redeem:           redeemHandler,
-		Subscription:     subscriptionHandler,
-		Announcement:     announcementHandler,
-		ChannelMonitor:   channelMonitorUserHandler,
-		ChannelMonitorV2: channelMonitorV2Handler,
-		Admin:            adminHandlers,
-		Gateway:          gatewayHandler,
-		OpenAIGateway:    openaiGatewayHandler,
-		Setting:          settingHandler,
-		Totp:             totpHandler,
-		Passkey:          passkeyHandler,
-		Payment:          paymentHandler,
-		PaymentWebhook:   paymentWebhookHandler,
-		AvailableChannel: availableChannelHandler,
-		ModelPlaza:       modelPlazaHandler,
-		AsyncImage:       asyncImageHandler,
-		BatchImage:       batchImageHandler,
-		RunningHub:       runningHubHandler,
+		ClientConfiguration: clientConfigurationHandler,
+		ClientInvocation:    clientInvocationHandler,
+		Auth:                authHandler,
+		User:                userHandler,
+		APIKey:              apiKeyHandler,
+		Usage:               usageHandler,
+		Redeem:              redeemHandler,
+		Subscription:        subscriptionHandler,
+		Announcement:        announcementHandler,
+		ChannelMonitor:      channelMonitorUserHandler,
+		ChannelMonitorV2:    channelMonitorV2Handler,
+		Admin:               adminHandlers,
+		Gateway:             gatewayHandler,
+		OpenAIGateway:       openaiGatewayHandler,
+		Setting:             settingHandler,
+		Totp:                totpHandler,
+		Passkey:             passkeyHandler,
+		Payment:             paymentHandler,
+		PaymentWebhook:      paymentWebhookHandler,
+		AvailableChannel:    availableChannelHandler,
+		ModelPlaza:          modelPlazaHandler,
+		AsyncImage:          asyncImageHandler,
+		BatchImage:          batchImageHandler,
+		RunningHub:          runningHubHandler,
 	}
 }
 
 // ProviderSet is the Wire provider set for all handlers
 var ProviderSet = wire.NewSet(
+	NewClientConfigurationHandler,
+	ProvideClientInvocationHandler,
 	// Top-level handlers
 	NewAuthHandler,
 	NewUserHandler,
@@ -299,3 +308,43 @@ var ProviderSet = wire.NewSet(
 	ProvideAdminHandlers,
 	ProvideHandlers,
 )
+
+// ProvideClientInvocationHandler assembles the private executor only when the
+// operator enabled client invocation. It reuses the existing gateway handlers,
+// billing admission, durable ledger and settlement events; a missing edge keeps
+// the route fail-closed instead of starting with a partial executor.
+func ProvideClientInvocationHandler(
+	cfg *config.Config,
+	configuration *ClientConfigurationHandler,
+	gatewayHandler *GatewayHandler,
+	openAIGatewayHandler *OpenAIGatewayHandler,
+	openAIGatewayService *service.OpenAIGatewayService,
+	apiKeyService *service.APIKeyService,
+	subscriptionService *service.SubscriptionService,
+	billingIdentities service.ClientBillingIdentityRepository,
+	ledger service.ClientInvocationLedgerRepository,
+	accounts service.AccountRepository,
+	settlementEvents service.UsageSettlementEventRepository,
+) *ClientInvocationHandler {
+	if cfg == nil || !cfg.ClientInvocation.Enabled {
+		return NewClientInvocationHandler(configuration)
+	}
+	adapter := NewClientInvocationGatewayAdapter(gatewayHandler, openAIGatewayHandler,
+		middleware.NewClientBillingAdmission(apiKeyService, subscriptionService, cfg))
+	composition, err := service.NewClientInvocationComposition(service.ClientInvocationCompositionDependencies{
+		Preparer:         service.NewClientInvocationPreparationService(configuration, configuration, billingIdentities),
+		GrantValidator:   configuration,
+		Ledger:           ledger,
+		Accounts:         accounts,
+		OpenAIGateway:    openAIGatewayService,
+		Admission:        adapter,
+		Dispatcher:       adapter,
+		SettlementEvents: settlementEvents,
+	})
+	if err != nil {
+		logger.L().With(zap.String("component", "handler.client_invocation")).Error("client_invocation.composition_unavailable")
+		return NewClientInvocationHandler(configuration)
+	}
+	configuration.EnableChatExecution()
+	return newClientInvocationHandlerWithRunner(configuration, composition)
+}

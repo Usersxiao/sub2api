@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -109,8 +110,7 @@ func ensureLoginUserActive(user *service.User) error {
 	return nil
 }
 
-// respondWithTokenPair 生成 Token 对并返回认证响应
-// 如果 Token 对生成失败，回退到只返回 Access Token（向后兼容）
+// respondWithTokenPair issues exactly one durable login after policy checks.
 func (h *AuthHandler) respondWithTokenPair(c *gin.Context, user *service.User) {
 	respondWithTokenPair(c, h.authService, user)
 }
@@ -124,17 +124,7 @@ func respondWithTokenPair(c *gin.Context, authService *service.AuthService, user
 	tokenPair, err := authService.GenerateTokenPair(c.Request.Context(), user, "")
 	if err != nil {
 		slog.Error("failed to generate token pair", "error", err, "user_id", user.ID)
-		// 回退到只返回Access Token
-		token, tokenErr := authService.GenerateToken(c.Request.Context(), user)
-		if tokenErr != nil {
-			response.InternalError(c, "Failed to generate token")
-			return
-		}
-		response.Success(c, AuthResponse{
-			AccessToken: token,
-			TokenType:   "Bearer",
-			User:        dto.UserFromService(user),
-		})
+		response.ErrorFrom(c, err)
 		return
 	}
 	response.Success(c, AuthResponse{
@@ -190,7 +180,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	_, user, err := h.authService.RegisterWithVerification(
+	user, err := h.authService.RegisterUserWithVerification(
 		c.Request.Context(),
 		req.Email,
 		req.Password,
@@ -249,12 +239,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	token, user, err := h.authService.Login(c.Request.Context(), req.Email, req.Password)
+	user, err := h.authService.AuthenticatePassword(c.Request.Context(), req.Email, req.Password)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
-	_ = token // token 由 authService.Login 返回但此处由 respondWithTokenPair 重新生成
 
 	if err := h.ensureBackendModeAllowsUser(c.Request.Context(), user); err != nil {
 		response.ErrorFrom(c, err)
@@ -264,7 +253,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	// Check if TOTP 2FA is enabled for this user
 	if h.totpService != nil && h.settingSvc.IsTotpEnabled(c.Request.Context()) && user.TotpEnabled {
 		// Create a temporary login session for 2FA
-		tempToken, err := h.totpService.CreateLoginSession(c.Request.Context(), user.ID, user.Email)
+		tempToken, err := h.totpService.CreateLoginSession(c.Request.Context(), user.ID, user.Email, user.SessionEpoch)
 		if err != nil {
 			response.InternalError(c, "Failed to create 2FA session")
 			return
@@ -312,12 +301,7 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 	// Get the login session
 	session, err := h.totpService.GetLoginSession(c.Request.Context(), req.TempToken)
 	if err != nil || session == nil {
-		tokenPrefix := ""
-		if len(req.TempToken) >= 8 {
-			tokenPrefix = req.TempToken[:8]
-		}
 		slog.Debug("login_2fa_session_invalid",
-			"temp_token_prefix", tokenPrefix,
 			"error", err)
 		response.BadRequest(c, "Invalid or expired 2FA session")
 		return
@@ -344,6 +328,11 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 	}
 	if err := ensureLoginUserActive(user); err != nil {
 		response.ErrorFrom(c, err)
+		return
+	}
+	if session.SessionEpoch <= 0 || user.SessionEpoch != session.SessionEpoch {
+		_ = h.totpService.DeleteLoginSession(c.Request.Context(), req.TempToken)
+		response.ErrorFrom(c, service.ErrTokenRevoked)
 		return
 	}
 
@@ -726,11 +715,32 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	// 允许空请求体（向后兼容）
 	_ = c.ShouldBindJSON(&req)
 
-	// 如果提供了Refresh Token，撤销它
+	// Revoke the durable login, including access-only sessions. A database outage
+	// is reported to callers; local clients still clear their own session first.
+	parts := strings.Fields(c.GetHeader("Authorization"))
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		claims, err := h.authService.ValidateToken(parts[1])
+		if err == nil || errors.Is(err, service.ErrTokenExpired) {
+			if err := h.authService.ValidateActiveSession(c.Request.Context(), claims); err == nil {
+				if err := h.authService.RevokeUserSession(c.Request.Context(), claims.UserID, claims.SessionID); err != nil {
+					response.ErrorFrom(c, err)
+					return
+				}
+			} else if errors.Is(err, service.ErrServiceUnavailable) {
+				response.ErrorFrom(c, err)
+				return
+			}
+		}
+	}
+
+	// Possession of the refresh token also permits revoking its login, preserving
+	// the original public logout API for clients with an expired access token.
 	if req.RefreshToken != "" {
 		if err := h.authService.RevokeRefreshToken(c.Request.Context(), req.RefreshToken); err != nil {
-			slog.Debug("failed to revoke refresh token", "error", err)
-			// 不影响登出流程
+			if !errors.Is(err, service.ErrRefreshTokenInvalid) && !errors.Is(err, service.ErrTokenRevoked) {
+				response.ErrorFrom(c, err)
+				return
+			}
 		}
 	}
 	h.consumePendingOAuthSessionOnLogout(c)

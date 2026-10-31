@@ -12,11 +12,16 @@ import (
 )
 
 type usageBillingRepository struct {
-	db *sql.DB
+	db              *sql.DB
+	writerAuthority service.UserPlatformQuotaWriterAuthority
 }
 
 func NewUsageBillingRepository(_ *dbent.Client, sqlDB *sql.DB) service.UsageBillingRepository {
 	return &usageBillingRepository{db: sqlDB}
+}
+
+func NewUsageBillingRepositoryWithWriterAuthority(_ *dbent.Client, sqlDB *sql.DB, authority service.UserPlatformQuotaWriterAuthority) service.UsageBillingRepository {
+	return &usageBillingRepository{db: sqlDB, writerAuthority: authority}
 }
 
 func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBillingCommand) (_ *service.UsageBillingApplyResult, err error) {
@@ -31,6 +36,15 @@ func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBi
 	if cmd.RequestID == "" {
 		return nil, service.ErrUsageBillingRequestIDRequired
 	}
+	if cmd.OrdinaryPlatformQuotaDeliveryMode != "" &&
+		(cmd.OrdinaryPlatformQuotaDeliveryMode != service.UsageBillingOrdinaryPlatformDeliveryDBV1 || cmd.OrdinaryPlatformQuota == nil) {
+		return nil, service.ErrUsageBillingOrdinaryPlatformDelivery
+	}
+	if cmd.OrdinaryPlatformQuota != nil {
+		if err := service.ValidateUsageBillingOrdinaryPlatformIntent(cmd, cmd.OrdinaryPlatformQuota); err != nil {
+			return nil, err
+		}
+	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -41,24 +55,113 @@ func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBi
 			_ = tx.Rollback()
 		}
 	}()
+	if cmd.OrdinaryPlatformQuotaDeliveryMode == service.UsageBillingOrdinaryPlatformDeliveryDBV1 {
+		if err := lockUserPlatformQuotaWriterAuthority(ctx, tx, r.writerAuthority, ""); err != nil {
+			return nil, err
+		}
+	}
+
+	// Permanent ordinary proofs outlive hot/archive retention, including when
+	// a later caller omits the new intent. Consult them before touching money.
+	lifecycleExists, err := batchImageBalanceLifecycleRequestExists(ctx, tx, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if lifecycleExists {
+		return nil, service.ErrBatchImageBalanceLifecycleConflict
+	}
+	batchJournal, err := findBatchImagePlatformQuotaJournal(ctx, tx, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if batchJournal != nil {
+		return nil, service.ErrUsageBillingRequestConflict
+	}
+	journal, err := findOrdinaryPlatformQuotaJournal(ctx, tx, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if journal != nil {
+		if err := verifyOrdinaryPlatformQuotaJournal(ctx, tx, cmd, journal); err != nil {
+			return nil, err
+		}
+		return &service.UsageBillingApplyResult{Applied: false}, nil
+	}
 
 	applied, err := r.claimUsageBillingKey(ctx, tx, cmd)
 	if err != nil {
 		return nil, err
 	}
-	if !applied {
+	// A competing transaction can commit its permanent proof while this
+	// transaction waits on dedup. Recheck even after a fresh claim, since dedup
+	// cleanup may have run between the two observations.
+	lifecycleExists, err = batchImageBalanceLifecycleRequestExists(ctx, tx, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if lifecycleExists {
+		return nil, service.ErrBatchImageBalanceLifecycleConflict
+	}
+	batchJournal, err = findBatchImagePlatformQuotaJournal(ctx, tx, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if batchJournal != nil {
+		return nil, service.ErrUsageBillingRequestConflict
+	}
+	journal, err = findOrdinaryPlatformQuotaJournal(ctx, tx, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if journal != nil {
+		if err := verifyOrdinaryPlatformQuotaJournal(ctx, tx, cmd, journal); err != nil {
+			return nil, err
+		}
 		return &service.UsageBillingApplyResult{Applied: false}, nil
+	}
+	if !applied {
+		if cmd.OrdinaryPlatformQuota != nil {
+			if err := verifyOrdinaryPlatformQuotaBilling(ctx, tx, cmd); err != nil {
+				return nil, err
+			}
+			// An older charge is not proof of its platform or quota incarnation.
+			// Never manufacture a historical journal using today's config.
+			return nil, service.ErrUsageBillingOrdinaryPlatformCoverageGap
+		}
+		return &service.UsageBillingApplyResult{Applied: false}, nil
+	}
+	if cmd.OrdinaryPlatformQuota != nil {
+		journal, err = observeOrdinaryPlatformQuota(ctx, tx, cmd)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	result := &service.UsageBillingApplyResult{Applied: true}
 	if err := r.applyUsageBillingEffects(ctx, tx, cmd, result); err != nil {
 		return nil, err
 	}
+	if journal != nil {
+		if err := insertOrdinaryPlatformQuotaJournal(ctx, tx, journal); err != nil {
+			return nil, err
+		}
+	}
+	receipt := ordinaryPlatformQuotaReceipt(journal)
+	if journal != nil && journal.disposition == "metered" && cmd.OrdinaryPlatformQuotaDeliveryMode == service.UsageBillingOrdinaryPlatformDeliveryDBV1 {
+		receipt.DeliveryMode = service.UsageBillingOrdinaryPlatformDeliveryDBV1
+		receipt.WriterEpoch = r.writerAuthority.Epoch
+		if err := insertOrdinaryPlatformQuotaDelivery(ctx, tx, cmd, receipt); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	tx = nil
+	// Only a fresh, committed charge exports its original private observation.
+	// Duplicate/legacy proofs never acquire a receipt from today's quota state.
+	result.OrdinaryPlatformQuotaReceipt = receipt
 	return result, nil
 }
 
@@ -110,52 +213,280 @@ func (r *usageBillingRepository) claimUsageBillingRequest(ctx context.Context, t
 }
 
 func (r *usageBillingRepository) ReserveBatchImageBalance(ctx context.Context, cmd *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error) {
-	return r.applyBatchImageBalanceHold(ctx, cmd, reserveUsageBillingBatchImageBalance)
+	return r.applyBatchImageBalanceHold(ctx, cmd, batchImageBalanceReserve, reserveUsageBillingBatchImageBalance)
 }
 
 func (r *usageBillingRepository) CaptureBatchImageBalance(ctx context.Context, cmd *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error) {
-	return r.applyBatchImageBalanceHold(ctx, cmd, captureUsageBillingBatchImageBalance)
+	return r.applyBatchImageBalanceHold(ctx, cmd, batchImageBalanceCapture, captureUsageBillingBatchImageBalance)
 }
 
 func (r *usageBillingRepository) ReleaseBatchImageBalance(ctx context.Context, cmd *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error) {
-	return r.applyBatchImageBalanceHold(ctx, cmd, releaseUsageBillingBatchImageBalance)
+	return r.applyBatchImageBalanceHold(ctx, cmd, batchImageBalanceRelease, releaseUsageBillingBatchImageBalance)
 }
+
+type batchImageBalanceOperation uint8
+
+const (
+	batchImageBalanceReserve batchImageBalanceOperation = iota
+	batchImageBalanceCapture
+	batchImageBalanceRelease
+)
 
 func (r *usageBillingRepository) applyBatchImageBalanceHold(
 	ctx context.Context,
 	cmd *service.BatchImageBalanceHoldCommand,
+	operation batchImageBalanceOperation,
 	apply func(context.Context, *sql.Tx, *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error),
-) (_ *service.BatchImageBalanceHoldResult, err error) {
+) (*service.BatchImageBalanceHoldResult, error) {
 	if cmd == nil {
 		return &service.BatchImageBalanceHoldResult{}, nil
 	}
 	if r == nil || r.db == nil {
 		return nil, errors.New("usage billing repository db is nil")
 	}
-	cmd.Normalize()
-	if cmd.RequestID == "" {
-		return nil, service.ErrUsageBillingRequestIDRequired
-	}
-
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if tx != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	applied, err := r.claimUsageBillingRequest(ctx, tx, cmd.RequestID, cmd.APIKeyID, cmd.RequestFingerprint)
+	defer tx.Rollback()
+	result, err := r.applyBatchImageBalanceHoldTx(ctx, tx, cmd, operation, apply, false)
 	if err != nil {
 		return nil, err
 	}
-	if !applied {
-		return &service.BatchImageBalanceHoldResult{Applied: false}, nil
+	// Duplicate/archive observations have no new money or proof to commit.
+	// Rolling back also avoids minting a native hot receipt for an old proof.
+	if !result.Applied {
+		return result, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// creatingNative is a private transaction-local permission held only by the
+// atomic INSERT job+birth+reserve path. It is never accepted from a command.
+func (r *usageBillingRepository) applyBatchImageBalanceHoldTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	cmd *service.BatchImageBalanceHoldCommand,
+	operation batchImageBalanceOperation,
+	apply func(context.Context, *sql.Tx, *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error),
+	creatingNative bool,
+) (*service.BatchImageBalanceHoldResult, error) {
+	cmd.Normalize()
+	if cmd.RequestID == "" {
+		return nil, service.ErrUsageBillingRequestIDRequired
+	}
+	if cmd.CapturePlatformQuota != nil {
+		if operation != batchImageBalanceCapture {
+			return nil, service.ErrBatchImagePlatformQuotaIntent
+		}
+		if err := service.ValidateBatchImagePlatformQuotaIntent(cmd, cmd.CapturePlatformQuota); err != nil {
+			return nil, err
+		}
+	}
+	candidate, err := validateBatchImageBalanceLifecycleCommand(cmd, operation)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockBatchImageBalanceOperation(ctx, tx, cmd); err != nil {
+		return nil, err
+	}
+	birth, err := findBatchImageNativeBirth(ctx, tx, cmd.BatchID)
+	if err != nil {
+		return nil, err
+	}
+	witnesses, err := loadBatchImageNativeMoneyOperations(ctx, tx, cmd.BatchID)
+	if err != nil {
+		return nil, err
+	}
+	if birth == nil && len(witnesses) != 0 {
+		return nil, service.ErrBatchImageNativeBirthHistory
+	}
+	if creatingNative && (birth == nil || operation != batchImageBalanceReserve) {
+		return nil, service.ErrBatchImageNativeBirthHistory
+	}
+	if birth != nil {
+		if err := service.ValidateBatchImageNativeBirthCommand(cmd, birth); err != nil {
+			return nil, err
+		}
+		if operation == batchImageBalanceCapture && cmd.CapturePlatformQuota == nil {
+			return nil, service.ErrBatchImageNativeBirthInput
+		}
+	}
+	proofs, err := loadBatchImageBalanceLifecycle(ctx, tx, cmd, candidate.RawHoldUSD)
+	if err != nil {
+		return nil, err
+	}
+	if birth != nil {
+		if creatingNative {
+			if len(proofs) != 0 {
+				return nil, service.ErrBatchImageNativeBirthHistory
+			}
+		} else if err := verifyBatchImageNativeReserve(birth, proofs); err != nil {
+			return nil, err
+		}
+	}
+	if err := verifyBatchImageNativeMoneyOperations(birth, witnesses, proofs, creatingNative); err != nil {
+		return nil, err
+	}
+	platform, err := loadBatchImagePlatformQuotaForLifecycle(ctx, tx, cmd, candidate.RawHoldUSD)
+	if err != nil {
+		return nil, err
+	}
+	if birth != nil {
+		if platform != nil && platform.provider != birth.Provider {
+			return nil, service.ErrBatchImageNativeBirthConflict
+		}
+		if (proofs["capture"] != nil && platform == nil) || (platform != nil && proofs["capture"] == nil) {
+			return nil, service.ErrBatchImageNativeBirthHistory
+		}
+	}
+	if captured := proofs["capture"]; captured != nil && platform != nil &&
+		(captured.BillingFingerprint != platform.billingFingerprint || captured.RawActualUSD != platform.rawCostUSD) {
+		return nil, service.ErrBatchImageBalanceLifecycleConflict
+	}
+	if proofs["release"] != nil && platform != nil {
+		return nil, service.ErrBatchImageBalanceLifecycleConflict
+	}
+	// A permanent replay must still reject conflicting source history. This
+	// also closes damaged-data cases left by writers outside this boundary.
+	ordinary, err := findOrdinaryPlatformQuotaJournal(ctx, tx, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if ordinary != nil {
+		return nil, service.ErrBatchImageBalanceLifecycleConflict
 	}
 
-	result, err := apply(ctx, tx, cmd)
+	// Global batch identity, rather than today's key/owner, controls terminal
+	// barriers. Historical receipts only block; they do not invent an outcome.
+	captureExists, err := batchImageLifecycleLegacyRequestExists(ctx, tx, service.BatchImageCaptureRequestID(cmd.BatchID))
+	if err != nil {
+		return nil, err
+	}
+	releaseExists, err := batchImageLifecycleLegacyRequestExists(ctx, tx, service.BatchImageReleaseRequestID(cmd.BatchID))
+	if err != nil {
+		return nil, err
+	}
+	switch operation {
+	case batchImageBalanceReserve:
+		if proofs["capture"] != nil || proofs["release"] != nil || platform != nil || captureExists || releaseExists {
+			return nil, service.ErrBatchImageBalanceLifecycleConflict
+		}
+	case batchImageBalanceCapture:
+		if proofs["release"] != nil || releaseExists {
+			return nil, service.ErrBatchImageBalanceLifecycleConflict
+		}
+	case batchImageBalanceRelease:
+		if proofs["capture"] != nil || platform != nil || captureExists {
+			return nil, service.ErrBatchImageCaptureAlreadyApplied
+		}
+	}
+
+	if proof := proofs[candidate.Operation]; proof != nil {
+		if birth != nil && operation == batchImageBalanceCapture && platform == nil {
+			return nil, service.ErrBatchImageNativeBirthHistory
+		}
+		if service.ValidateBatchImageBalanceLifecycleProof(cmd, proof) != nil {
+			return nil, service.ErrBatchImageBalanceLifecycleConflict
+		}
+		if _, err := verifyBatchImageLifecycleBillingProofs(ctx, tx, cmd.RequestID, cmd.APIKeyID, cmd.RequestFingerprint); err != nil {
+			return nil, err
+		}
+		if err := verifyBatchImageLifecycleReserveReference(ctx, tx, cmd, proof, proofs); err != nil {
+			return nil, err
+		}
+		if platform != nil {
+			if err := verifyBatchImagePlatformQuotaJournal(ctx, tx, cmd, platform); err != nil {
+				return nil, batchImageLifecycleConflict(err)
+			}
+		}
+		return &service.BatchImageBalanceHoldResult{Applied: false,
+			PlatformCoverageMissing: operation == batchImageBalanceCapture && cmd.CapturePlatformQuota != nil && platform == nil}, nil
+	}
+	if platform != nil {
+		if birth != nil {
+			return nil, service.ErrBatchImageNativeBirthHistory
+		}
+		if err := verifyBatchImagePlatformQuotaJournal(ctx, tx, cmd, platform); err != nil {
+			return nil, batchImageLifecycleConflict(err)
+		}
+		if _, err := verifyBatchImageLifecycleBillingProofs(ctx, tx, cmd.RequestID, cmd.APIKeyID, cmd.RequestFingerprint); err != nil {
+			return nil, err
+		}
+		return &service.BatchImageBalanceHoldResult{Applied: false, LifecycleCoverageMissing: true}, nil
+	}
+	legacy, err := verifyBatchImageLifecycleBillingProofs(ctx, tx, cmd.RequestID, cmd.APIKeyID, cmd.RequestFingerprint)
+	if err != nil {
+		return nil, err
+	}
+	applied, err := r.claimUsageBillingRequest(ctx, tx, cmd.RequestID, cmd.APIKeyID, cmd.RequestFingerprint)
+	if err != nil {
+		return nil, batchImageLifecycleConflict(err)
+	}
+	// An ordinary writer can finish while this transaction waits for the shared
+	// dedup claim. Recheck its permanent source before observing any money.
+	ordinary, err = findOrdinaryPlatformQuotaJournal(ctx, tx, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if ordinary != nil {
+		return nil, service.ErrBatchImageBalanceLifecycleConflict
+	}
+	if _, err := verifyBatchImageLifecycleBillingProofs(ctx, tx, cmd.RequestID, cmd.APIKeyID, cmd.RequestFingerprint); err != nil {
+		return nil, err
+	}
+	if !applied || legacy {
+		if birth != nil {
+			return nil, service.ErrBatchImageNativeBirthHistory
+		}
+		return &service.BatchImageBalanceHoldResult{Applied: false, LifecycleCoverageMissing: true,
+			PlatformCoverageMissing: operation == batchImageBalanceCapture && cmd.CapturePlatformQuota != nil}, nil
+	}
+	if operation == batchImageBalanceReserve && !creatingNative {
+		return nil, service.ErrBatchImageNativeBirthHistory
+	}
+
+	proof := candidate
+	if operation != batchImageBalanceReserve {
+		origin, reserveFP, err := batchImageBalanceLifecycleReserveSource(ctx, tx, cmd, proofs, operation)
+		if err != nil {
+			return nil, err
+		}
+		outcome := "captured"
+		if operation == batchImageBalanceRelease {
+			outcome = "refunded"
+			if cmd.HoldAmount == 0 {
+				outcome = "zero_hold"
+			} else if origin == "none" {
+				outcome = "no_hold_terminal"
+			}
+		}
+		proof, err = service.FreezeBatchImageBalanceLifecycleProof(cmd, candidate.Operation, outcome, origin, reserveFP)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if cmd.CapturePlatformQuota != nil {
+		platform, err = observeBatchImagePlatformQuota(ctx, tx, cmd)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var result *service.BatchImageBalanceHoldResult
+	if operation == batchImageBalanceRelease {
+		if proof.Outcome == "refunded" {
+			// Reservation authority was checked above. The original financial
+			// SQL is shared with the old helper without relying on hot dedup.
+			result, err = refundUsageBillingBatchImageBalance(ctx, tx, cmd)
+		} else {
+			result = &service.BatchImageBalanceHoldResult{}
+		}
+	} else {
+		result, err = apply(ctx, tx, cmd)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -163,11 +494,14 @@ func (r *usageBillingRepository) applyBatchImageBalanceHold(
 		result = &service.BatchImageBalanceHoldResult{}
 	}
 	result.Applied = true
-
-	if err := tx.Commit(); err != nil {
+	if err := insertBatchImageBalanceLifecycle(ctx, tx, proof); err != nil {
 		return nil, err
 	}
-	tx = nil
+	if platform != nil {
+		if err := insertBatchImagePlatformQuotaJournal(ctx, tx, platform); err != nil {
+			return nil, err
+		}
+	}
 	return result, nil
 }
 
@@ -347,6 +681,12 @@ func releaseUsageBillingBatchImageBalance(ctx context.Context, tx *sql.Tx, cmd *
 		logger.LegacyPrintf("repository.usage_billing", "[BatchImage] release skipped, hold was never reserved: batch=%s", cmd.BatchID)
 		return &service.BatchImageBalanceHoldResult{}, nil
 	}
+	return refundUsageBillingBatchImageBalance(ctx, tx, cmd)
+}
+
+// The caller has already proved reservation authority. Keep the historical
+// refund SQL unchanged and share it with the legacy helper above.
+func refundUsageBillingBatchImageBalance(ctx context.Context, tx *sql.Tx, cmd *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error) {
 	var balance, frozen float64
 	err := tx.QueryRowContext(ctx, `
 		UPDATE users

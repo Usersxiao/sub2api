@@ -45,7 +45,9 @@ func UserFromService(u *service.User) *User {
 		out.APIKeys = make([]APIKey, 0, len(u.APIKeys))
 		for i := range u.APIKeys {
 			k := u.APIKeys[i]
-			out.APIKeys = append(out.APIKeys, *APIKeyFromService(&k))
+			if mapped := APIKeyFromService(&k); mapped != nil {
+				out.APIKeys = append(out.APIKeys, *mapped)
+			}
 		}
 	}
 	if len(u.Subscriptions) > 0 {
@@ -79,7 +81,7 @@ func UserFromServiceAdmin(u *service.User) *AdminUser {
 }
 
 func APIKeyFromService(k *service.APIKey) *APIKey {
-	if k == nil {
+	if !k.IsCredential() {
 		return nil
 	}
 	out := &APIKey{

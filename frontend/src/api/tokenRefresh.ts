@@ -9,8 +9,16 @@ const TOKEN_EXPIRES_AT_KEY = 'token_expires_at'
 const TOKEN_REFRESH_LOCK_NAME = 'sub2api-auth-token-refresh'
 const TOKEN_REFRESH_TIMEOUT_MS = 30_000
 const PEER_REFRESH_WAIT_MS = 1_000
-const PEER_REFRESH_GRACE_MS = 1_000
 const PEER_REFRESH_POLL_MS = 25
+
+export class TokenRefreshCoordinationError extends Error {
+  readonly code = 'TOKEN_REFRESH_COORDINATION_UNAVAILABLE'
+
+  constructor() {
+    super('Automatic session refresh is unavailable in this browser. Sign in again when the session expires.')
+    this.name = 'TokenRefreshCoordinationError'
+  }
+}
 
 export interface RefreshTokenResponse {
   access_token: string
@@ -133,14 +141,8 @@ function persistTokenPair(tokens: RefreshTokenResponse): void {
 
 async function requestTokenPair(
   snapshot: AuthSnapshot,
-  failedAccessToken?: string | null,
-  mayHaveUncoordinatedPeer = false
+  failedAccessToken?: string | null
 ): Promise<RefreshTokenResponse> {
-  // If this request loses a one-time-token race, the winning peer can legitimately take as long
-  // as our own HTTP timeout to publish its replacement token. Keep the recovery window tied to
-  // that timeout instead of an arbitrary short delay.
-  const peerRefreshDeadline = Date.now() + TOKEN_REFRESH_TIMEOUT_MS + PEER_REFRESH_GRACE_MS
-
   try {
     const response = await axios.post<ApiResponse<RefreshTokenResponse>>(
       `${getAPIBaseURL()}/auth/refresh`,
@@ -166,20 +168,9 @@ async function requestTokenPair(
     persistTokenPair(payload.data)
     return payload.data
   } catch (error) {
-    // A peer tab may have rotated the one-time refresh token while this request was in flight.
-    // A 4xx response can arrive quickly while the winning peer's response is still in flight, so
-    // wait through the shared request deadline before treating the session as expired. Transient
-    // non-4xx failures retain the short reconciliation window.
-    const responseStatus = (error as { response?: { status?: unknown } }).response?.status
-    const isTokenRejection =
-      typeof responseStatus === 'number' && responseStatus >= 400 && responseStatus < 500
-    const peerResult = await waitForPeerRefresh(
-      snapshot,
-      failedAccessToken,
-      isTokenRejection && mayHaveUncoordinatedPeer
-        ? peerRefreshDeadline
-        : Date.now() + PEER_REFRESH_WAIT_MS
-    )
+    // A new sign-in can replace storage independently of this refresh lock.
+    // Reconcile that replacement without restoring the previous credentials.
+    const peerResult = await waitForPeerRefresh(snapshot, failedAccessToken)
     if (peerResult) {
       return peerResult
     }
@@ -188,27 +179,27 @@ async function requestTokenPair(
 }
 
 async function runRefresh(options: RefreshAuthTokensOptions): Promise<RefreshTokenResponse> {
+  if (typeof navigator === 'undefined' || !navigator.locks) {
+    // Strict refresh replay revokes the complete session. Sending an uncoordinated
+    // request could invalidate another tab's successfully rotated credentials.
+    throw new TokenRefreshCoordinationError()
+  }
   const snapshot = readAuthSnapshot()
-  const refresh = async (mayHaveUncoordinatedPeer = false): Promise<RefreshTokenResponse> => {
+  return navigator.locks.request(TOKEN_REFRESH_LOCK_NAME, async () => {
     const peerResult = readPeerRefreshResult(snapshot, options.failedAccessToken)
     if (peerResult) {
       return peerResult
     }
-    return requestTokenPair(snapshot, options.failedAccessToken, mayHaveUncoordinatedPeer)
-  }
-
-  if (typeof navigator !== 'undefined' && navigator.locks) {
-    return navigator.locks.request(TOKEN_REFRESH_LOCK_NAME, () => refresh(false))
-  }
-
-  return refresh(true)
+    return requestTokenPair(snapshot, options.failedAccessToken)
+  })
 }
 
 /**
  * Refresh and persist the browser session.
  *
  * Calls in the same document share one promise. Web Locks serialize refreshes across tabs, while
- * the token snapshot check adopts a peer's newly rotated token instead of logging the user out.
+ * the token snapshot check adopts a peer's newly rotated token. Browsers without
+ * Web Locks retain their current access token and require sign-in when it expires.
  */
 export function refreshAuthTokens(
   options: RefreshAuthTokensOptions = {}

@@ -21,6 +21,10 @@ type UsageBillingCommand struct {
 	APIKeyID           int64
 	RequestFingerprint string
 	RequestPayloadHash string
+	// OrdinaryPlatformQuota is a separate private source proof. It is excluded
+	// from the historical billing fingerprint and the v1/v2 settlement wire.
+	OrdinaryPlatformQuota             *UsageBillingOrdinaryPlatformIntent `json:"-"`
+	OrdinaryPlatformQuotaDeliveryMode string                              `json:"-"`
 
 	UserID              int64
 	AccountID           int64
@@ -173,18 +177,24 @@ type UsageBillingApplyResult struct {
 	NewBalance           *float64           // post-deduction balance (nil = no balance deduction)
 	BalanceOverdrafted   bool               // true when the sufficient-balance guard missed and debt was still recorded
 	QuotaState           *AccountQuotaState // post-increment quota state (nil = no quota increment)
+	// Only a fresh committed ordinary Apply returns this private observation.
+	OrdinaryPlatformQuotaReceipt *UsageBillingOrdinaryPlatformReceipt `json:"-"`
 }
 
 // BatchImageBalanceHoldCommand describes an idempotent balance hold operation.
 type BatchImageBalanceHoldCommand struct {
-	RequestID          string
-	APIKeyID           int64
-	RequestFingerprint string
-	RequestPayloadHash string
-	UserID             int64
-	BatchID            string
-	HoldAmount         float64
-	ActualAmount       float64
+	RequestID            string
+	APIKeyID             int64
+	RequestFingerprint   string
+	RequestPayloadHash   string
+	UserID               int64
+	BatchID              string
+	HoldAmount           float64
+	ActualAmount         float64
+	CapturePlatformQuota *BatchImagePlatformQuotaIntent `json:"-"`
+	// ExpectedReserveFingerprint is a private reconstruction hint, never proof
+	// that the corresponding reservation actually committed.
+	ExpectedReserveFingerprint string `json:"-"`
 }
 
 func (c *BatchImageBalanceHoldCommand) Normalize() {
@@ -221,6 +231,10 @@ type BatchImageBalanceHoldResult struct {
 	Applied       bool
 	NewBalance    *float64
 	FrozenBalance *float64
+	// A historical capture dedup receipt is not a platform source proof.
+	PlatformCoverageMissing bool `json:"-"`
+	// Historical dedup alone does not establish an observed lifecycle proof.
+	LifecycleCoverageMissing bool `json:"-"`
 }
 
 type UsageBillingRepository interface {

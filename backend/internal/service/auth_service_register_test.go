@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -246,7 +247,7 @@ func newAuthService(repo *userRepoStub, settings map[string]string, emailCache E
 		emailService = NewEmailService(&settingRepoStub{values: settings}, emailCache)
 	}
 
-	return NewAuthService(
+	return withUnitAuthSessions(NewAuthService(
 		nil, // entClient
 		repo,
 		nil, // redeemRepo
@@ -260,7 +261,7 @@ func newAuthService(repo *userRepoStub, settings map[string]string, emailCache E
 		nil, // defaultSubAssigner
 		nil, // affiliateService
 		quotaRepo,
-	)
+	))
 }
 
 func TestAuthService_Register_Disabled(t *testing.T) {
@@ -661,10 +662,9 @@ func TestAuthService_ValidateToken_ExpiredReturnsClaimsWithError(t *testing.T) {
 	require.Equal(t, int64(1), claims.UserID)
 
 	// 模拟过期 token（通过创建一个过期很久的 token）
-	service.cfg.JWT.ExpireHour = -1 // 设置为负数使 token 立即过期
-	expiredToken, err := service.GenerateToken(context.Background(), user)
+	claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-time.Hour))
+	expiredToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(service.cfg.JWT.Secret))
 	require.NoError(t, err)
-	service.cfg.JWT.ExpireHour = 1 // 恢复
 
 	// 验证过期 token 应返回 claims 和 ErrTokenExpired
 	claims, err = service.ValidateToken(expiredToken)
@@ -685,17 +685,15 @@ func TestAuthService_RefreshToken_ExpiredTokenNoPanic(t *testing.T) {
 	repo := &userRepoStub{user: user}
 	service := newAuthService(repo, nil, nil, nil)
 
-	// 创建过期 token
-	service.cfg.JWT.ExpireHour = -1
-	expiredToken, err := service.GenerateToken(context.Background(), user)
+	// Sign an expired fixture; production never creates an expired session.
+	expiredToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &JWTClaims{UserID: user.ID, RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(-time.Hour))}}).SignedString([]byte(service.cfg.JWT.Secret))
 	require.NoError(t, err)
-	service.cfg.JWT.ExpireHour = 1
 
 	// RefreshToken 使用过期 token 不应 panic
 	require.NotPanics(t, func() {
 		newToken, err := service.RefreshToken(context.Background(), expiredToken)
-		require.NoError(t, err)
-		require.NotEmpty(t, newToken)
+		require.ErrorIs(t, err, ErrTokenExpired)
+		require.Empty(t, newToken)
 	})
 }
 

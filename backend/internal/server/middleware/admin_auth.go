@@ -185,6 +185,16 @@ func validateJWTForAdmin(
 	}
 
 	// 从数据库获取用户
+	if err := authService.ValidateActiveSession(c.Request.Context(), claims); err != nil {
+		if errors.Is(err, service.ErrServiceUnavailable) {
+			AbortWithError(c, 503, "SERVICE_UNAVAILABLE", "Session verification temporarily unavailable")
+		} else {
+			AbortWithError(c, 401, "TOKEN_REVOKED", "Session has ended")
+		}
+		return false
+	}
+
+	// 从数据库获取用户
 	user, err := userService.GetByID(c.Request.Context(), claims.UserID)
 	if err != nil {
 		if errors.Is(err, service.ErrUserNotFound) {

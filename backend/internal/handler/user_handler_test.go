@@ -16,6 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -517,11 +518,12 @@ func TestUserHandlerBindEmailIdentityReturnsProfileResponse(t *testing.T) {
 
 	repo := &userHandlerRepoStub{
 		user: &service.User{
-			ID:       11,
-			Email:    "legacy-user" + service.LinuxDoConnectSyntheticEmailDomain,
-			Username: "legacy-user",
-			Role:     service.RoleUser,
-			Status:   service.StatusActive,
+			ID:           11,
+			Email:        "legacy-user" + service.LinuxDoConnectSyntheticEmailDomain,
+			Username:     "legacy-user",
+			Role:         service.RoleUser,
+			Status:       service.StatusActive,
+			SessionEpoch: 1,
 		},
 	}
 	emailCache := &userHandlerEmailCacheStub{
@@ -539,6 +541,12 @@ func TestUserHandlerBindEmailIdentityReturnsProfileResponse(t *testing.T) {
 	}
 	emailService := service.NewEmailService(nil, emailCache)
 	authService := service.NewAuthService(nil, repo, nil, nil, cfg, nil, emailService, nil, nil, nil, nil, nil, nil)
+	authService.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
+	token, err := authService.GenerateToken(context.Background(), repo.user)
+	require.NoError(t, err)
+	claims, err := authService.ValidateToken(token)
+	require.NoError(t, err)
+	require.NoError(t, authService.ValidateActiveSession(context.Background(), claims))
 	handler := NewUserHandler(service.NewUserService(repo, nil, nil, nil), authService, nil, nil, nil, nil)
 
 	body := []byte(`{"email":"new@example.com","verify_code":"123456","password":"new-password"}`)
@@ -564,6 +572,7 @@ func TestUserHandlerBindEmailIdentityReturnsProfileResponse(t *testing.T) {
 	require.Equal(t, 0, resp.Code)
 	require.Equal(t, "new@example.com", resp.Data.Email)
 	require.True(t, resp.Data.EmailBound)
+	require.ErrorIs(t, authService.ValidateActiveSession(context.Background(), claims), service.ErrTokenRevoked)
 }
 
 func TestUserHandlerUnbindIdentityReturnsUpdatedProfile(t *testing.T) {
@@ -631,6 +640,7 @@ func TestUserHandlerUnbindIdentityRevokesAllUserSessionsWhenAuthServiceConfigure
 			Role:         service.RoleUser,
 			Status:       service.StatusActive,
 			TokenVersion: 4,
+			SessionEpoch: 1,
 		},
 		identities: []service.UserAuthIdentityRecord{
 			{
@@ -653,6 +663,12 @@ func TestUserHandlerUnbindIdentityRevokesAllUserSessionsWhenAuthServiceConfigure
 		},
 	}
 	authService := service.NewAuthService(nil, repo, nil, refreshTokenCache, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	authService.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
+	token, err := authService.GenerateToken(context.Background(), repo.user)
+	require.NoError(t, err)
+	claims, err := authService.ValidateToken(token)
+	require.NoError(t, err)
+	require.NoError(t, authService.ValidateActiveSession(context.Background(), claims))
 	handler := NewUserHandler(service.NewUserService(repo, nil, nil, nil), authService, nil, nil, nil, nil)
 
 	recorder := httptest.NewRecorder()
@@ -665,10 +681,16 @@ func TestUserHandlerUnbindIdentityRevokesAllUserSessionsWhenAuthServiceConfigure
 
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Equal(t, []int64{23}, refreshTokenCache.revokedUserIDs)
-	// 撤销依赖的是 refresh session 清理，而不是 token_version：users 表没有这一列
-	// （见 resolvedTokenVersion，实际值由 email+password_hash 指纹推导），
-	// 所以此前"自增 TokenVersion 再整行写回"不持久化任何东西，
-	// 却会用旧快照覆盖并发写入的列。这里断言用户行未被改写。
+	// Durable authority invalidates access JWTs independently of Redis cleanup.
+	require.ErrorIs(t, authService.ValidateActiveSession(context.Background(), claims), service.ErrTokenRevoked)
+	freshUser := *repo.user
+	freshUser.SessionEpoch = claims.SessionEpoch + 1
+	freshToken, err := authService.GenerateToken(context.Background(), &freshUser)
+	require.NoError(t, err)
+	freshClaims, err := authService.ValidateToken(freshToken)
+	require.NoError(t, err)
+	require.Greater(t, freshClaims.SessionEpoch, claims.SessionEpoch)
+	require.NoError(t, authService.ValidateActiveSession(context.Background(), freshClaims))
 	require.Equal(t, int64(4), repo.user.TokenVersion)
 }
 
@@ -683,6 +705,7 @@ func TestUserHandlerUnbindIdentityDoesNotRevokeSessionsWhenNothingWasUnbound(t *
 			Role:         service.RoleUser,
 			Status:       service.StatusActive,
 			TokenVersion: 4,
+			SessionEpoch: 1,
 		},
 		identities: []service.UserAuthIdentityRecord{
 			{
@@ -700,6 +723,12 @@ func TestUserHandlerUnbindIdentityDoesNotRevokeSessionsWhenNothingWasUnbound(t *
 		},
 	}
 	authService := service.NewAuthService(nil, repo, nil, refreshTokenCache, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	authService.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
+	token, err := authService.GenerateToken(context.Background(), repo.user)
+	require.NoError(t, err)
+	claims, err := authService.ValidateToken(token)
+	require.NoError(t, err)
+	require.NoError(t, authService.ValidateActiveSession(context.Background(), claims))
 	handler := NewUserHandler(service.NewUserService(repo, nil, nil, nil), authService, nil, nil, nil, nil)
 
 	recorder := httptest.NewRecorder()
@@ -713,6 +742,7 @@ func TestUserHandlerUnbindIdentityDoesNotRevokeSessionsWhenNothingWasUnbound(t *
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Empty(t, repo.unbound)
 	require.Empty(t, refreshTokenCache.revokedUserIDs)
+	require.NoError(t, authService.ValidateActiveSession(context.Background(), claims))
 	require.Equal(t, int64(4), repo.user.TokenVersion)
 }
 
@@ -720,11 +750,12 @@ func TestUserHandlerBindEmailIdentityRejectsWrongCurrentPasswordForBoundEmail(t 
 	gin.SetMode(gin.TestMode)
 
 	user := &service.User{
-		ID:       11,
-		Email:    "current@example.com",
-		Username: "bound-user",
-		Role:     service.RoleUser,
-		Status:   service.StatusActive,
+		ID:           11,
+		Email:        "current@example.com",
+		Username:     "bound-user",
+		Role:         service.RoleUser,
+		Status:       service.StatusActive,
+		SessionEpoch: 1,
 	}
 	require.NoError(t, user.SetPassword("current-password"))
 
@@ -744,6 +775,7 @@ func TestUserHandlerBindEmailIdentityRejectsWrongCurrentPasswordForBoundEmail(t 
 	}
 	emailService := service.NewEmailService(nil, emailCache)
 	authService := service.NewAuthService(nil, repo, nil, nil, cfg, nil, emailService, nil, nil, nil, nil, nil, nil)
+	authService.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 	handler := NewUserHandler(service.NewUserService(repo, nil, nil, nil), authService, nil, nil, nil, nil)
 
 	body := []byte(`{"email":"new@example.com","verify_code":"123456","password":"wrong-password"}`)

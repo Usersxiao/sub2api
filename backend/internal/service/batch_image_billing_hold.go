@@ -44,7 +44,7 @@ func buildBatchImageHoldCommand(job *BatchImageJob, requestID string, actualAmou
 	if actualAmount < 0 {
 		actualAmount = 0
 	}
-	return &BatchImageBalanceHoldCommand{
+	cmd := &BatchImageBalanceHoldCommand{
 		RequestID:          requestID,
 		APIKeyID:           *job.APIKeyID,
 		UserID:             job.UserID,
@@ -52,7 +52,18 @@ func buildBatchImageHoldCommand(job *BatchImageJob, requestID string, actualAmou
 		HoldAmount:         holdAmount,
 		ActualAmount:       actualAmount,
 		RequestPayloadHash: strings.TrimSpace(payloadHash),
-	}, nil
+	}
+	// Capture carries the settlement manifest as its payload hash, while the
+	// original reserve bound the persisted submission request hash. Reconstruct
+	// that original command rather than interpreting the manifest as reserve.
+	reserve := *cmd
+	reserve.RequestID = BatchImageHoldRequestID(job.BatchID)
+	reserve.RequestFingerprint = ""
+	reserve.RequestPayloadHash = strings.TrimSpace(batchImageDerefString(job.RequestHash))
+	reserve.ActualAmount = 0
+	reserve.Normalize()
+	cmd.ExpectedReserveFingerprint = reserve.RequestFingerprint
+	return cmd, nil
 }
 
 func reserveBatchImageBalanceHold(ctx context.Context, repo UsageBillingRepository, job *BatchImageJob, payloadHash string) error {
@@ -83,6 +94,12 @@ func captureBatchImageBalanceHold(ctx context.Context, repo UsageBillingReposito
 	if err != nil {
 		return err
 	}
+	cmd.Normalize()
+	intent, err := FreezeBatchImagePlatformQuotaIntent(cmd, job.Provider)
+	if err != nil {
+		return ErrBatchImageSettlementBillingFailed.WithCause(err)
+	}
+	cmd.CapturePlatformQuota = intent
 	if _, err := repo.CaptureBatchImageBalance(ctx, cmd); err != nil {
 		return ErrBatchImageSettlementBillingFailed.WithCause(err)
 	}

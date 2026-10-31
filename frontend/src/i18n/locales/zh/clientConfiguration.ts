@@ -1,0 +1,20 @@
+export default {
+  title: 'AutoDesign 客户端配置',
+  description: '为已登录的 AutoDesign 用户发布模型目录、用途默认值和可编辑参数。每个用户仍按现有分组、订阅和模型权限裁剪。',
+  readOnly: '当前阶段仅同步配置，尚未启用模型执行和网关凭据。prices 必须为空数组；RunningHub 属于独立数字人模块。',
+  loading: '正在加载客户端配置…',
+  empty: '当前发布目录为空。客户端保持登录，并提示暂无可用模型。',
+  routeCount: '已配置 {count} 条路线。用户只收到其分组、渠道模型和已配置账号实际允许的路线。',
+  editor: '发布配置（JSON）',
+  help: '保持 instanceId 稳定。routes 每项包含 groupIds 与 route；defaults 将用途映射至可用 routeId。最多 200 条路线、每条 100 个参数、总计 1 MiB。公开路线字段中不要填写密钥、令牌、地址或渠道细节。',
+  example: '路线条目示例',
+  exampleHint: '将条目加入 routes，并替换为现有分组和已配置模型。例如将 defaults.chat 设为 writing。此示例不会创建账号或启用执行。',
+  save: '发布客户端配置',
+  saving: '正在发布…',
+  reload: '重新读取已保存配置',
+  saved: '客户端配置已发布。已登录客户端会在 30 秒内自动刷新。',
+  invalidJSON: '请输入有效的 JSON 配置对象。',
+  tooLarge: '配置超过 1 MiB。',
+  loadError: '客户端配置加载失败，请重试。',
+  saveError: '配置保存失败，请检查配置后重试。'
+}

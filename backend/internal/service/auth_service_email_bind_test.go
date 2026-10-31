@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/stretchr/testify/require"
 
 	"entgo.io/ent/dialect"
@@ -114,6 +115,7 @@ CREATE TABLE IF NOT EXISTS user_provider_default_grants (
 	}
 
 	svc := service.NewAuthService(client, repo, nil, refreshTokenCache, cfg, settingSvc, emailSvc, nil, nil, nil, defaultSubAssigner, nil, nil)
+	svc.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 	return svc, repo, client
 }
 
@@ -608,6 +610,7 @@ func TestAuthServiceBindEmailIdentity_RevokesExistingAccessAndRefreshTokens(t *t
 	}
 	emailService := service.NewEmailService(nil, cache)
 	svc := service.NewAuthService(nil, userRepo, nil, refreshTokenCache, cfg, nil, emailService, nil, nil, nil, nil, nil, nil)
+	svc.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 
 	oldTokenPair, err := svc.GenerateTokenPair(ctx, &service.User{
 		ID:           41,

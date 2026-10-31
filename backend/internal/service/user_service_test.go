@@ -362,8 +362,8 @@ func (m *mockBillingCache) DeleteUserPlatformQuotaCache(context.Context, int64, 
 	return nil
 }
 
-func (m *mockBillingCache) IncrUserPlatformQuotaUsageCache(context.Context, int64, string, float64, time.Duration, bool) error {
-	return nil
+func (m *mockBillingCache) IncrUserPlatformQuotaUsageCache(context.Context, int64, string, float64, time.Duration, bool) (UserPlatformQuotaIncrementResult, error) {
+	return UserPlatformQuotaIncrementResult{Status: QuotaIncrementApplied}, nil
 }
 
 func (m *mockBillingCache) PopDirtyUserPlatformQuotaKeys(context.Context, int) ([]UserPlatformQuotaKey, error) {

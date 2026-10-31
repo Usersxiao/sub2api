@@ -33,6 +33,11 @@ func RegisterAdminRoutes(
 	// 受限密钥的账户操作走独立资源校验，普通管理员保持原处理器。
 	admin.Use(h.Admin.Account.ScopedAdminKeyAccounts)
 	{
+		if h.ClientConfiguration != nil {
+			admin.GET("/client-config", h.ClientConfiguration.GetAdminConfiguration)
+			admin.PUT("/client-config", h.ClientConfiguration.PutAdminConfiguration)
+		}
+
 		// 部署与运营合规确认
 		registerAdminComplianceRoutes(admin, h)
 

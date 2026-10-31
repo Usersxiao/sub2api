@@ -36,14 +36,18 @@ type UserPlatformQuotaKey struct {
 
 // UserPlatformQuotaCacheEntry Redis hash 反序列化结果。
 //
-// SchemaVersion 用于向后兼容：
-//   - 0（旧 entry，无 SchemaVersion 字段）→ 视为 cache MISS，强制 refresh
-//   - 1（当前版本）→ 包含 limits 和 window_start，可免 DB 查询
-//
-// limit 字段为 nil 表示"无限额"（DB 中对应列为 NULL）。
+// Admission requires the current schema, a cache-instance revision and matching
+// DB control identity. Older entries remain readable for controlled recovery.
 const UserPlatformQuotaCacheSchemaV1 = int64(1)
 
 type UserPlatformQuotaCacheEntry struct {
+	// DB control identity fences snapshot writes and validates cached observations.
+	QuotaRowID        int64 `json:"-"`
+	ControlGeneration int64 `json:"-"`
+	// CacheInstance changes on every conditional fill/rotation or raw replacement.
+	// Combined with Version it prevents an evicted/recreated key from passing CAS.
+	CacheInstance string `json:"-"`
+
 	DailyUsageUSD   float64
 	WeeklyUsageUSD  float64
 	MonthlyUsageUSD float64
@@ -58,6 +62,29 @@ type UserPlatformQuotaCacheEntry struct {
 	DailyWindowStart   *time.Time
 	WeeklyWindowStart  *time.Time
 	MonthlyWindowStart *time.Time
+}
+
+// UserPlatformQuotaIncrementStatus describes whether the non-idempotent cache
+// increment committed. Only Applied confirms a complete increment.
+type UserPlatformQuotaIncrementStatus string
+
+const (
+	QuotaIncrementApplied      UserPlatformQuotaIncrementStatus = "applied"
+	QuotaIncrementMissing      UserPlatformQuotaIncrementStatus = "missing"
+	QuotaIncrementIncompatible UserPlatformQuotaIncrementStatus = "incompatible"
+	QuotaIncrementContended    UserPlatformQuotaIncrementStatus = "contended"
+)
+
+// UserPlatformQuotaIncrementResult is private bookkeeping, never a client DTO.
+type UserPlatformQuotaIncrementResult struct {
+	Status UserPlatformQuotaIncrementStatus `json:"-"`
+}
+
+// UserPlatformQuotaCacheCAS is optional so unrelated BillingCache test doubles
+// need not implement mutation policy. Quota admission fails closed when a
+// required conditional write is unsupported; it never falls back to blind SET.
+type UserPlatformQuotaCacheCAS interface {
+	CompareAndSetUserPlatformQuotaCache(ctx context.Context, userID int64, platform string, expected, next *UserPlatformQuotaCacheEntry, ttl time.Duration) (bool, error)
 }
 
 // BillingCache defines cache operations for billing service
@@ -84,9 +111,10 @@ type BillingCache interface {
 	GetUserPlatformQuotaCache(ctx context.Context, userID int64, platform string) (*UserPlatformQuotaCacheEntry, bool, error)
 	SetUserPlatformQuotaCache(ctx context.Context, userID int64, platform string, entry *UserPlatformQuotaCacheEntry, ttl time.Duration) error
 	DeleteUserPlatformQuotaCache(ctx context.Context, userID int64, platform string) error
-	// IncrUserPlatformQuotaUsageCache 在缓存命中时累加用量；缓存未命中（key 不存在）静默返回 nil。
+	// IncrUserPlatformQuotaUsageCache 先轮换过期窗口再累加用量；只有 Applied 确认提交。
+	// 缺失、不兼容或条件冲突耗尽显式返回状态；执行错误可能提交，调用方不得自动重试。
 	// markDirty=true 时将该 key 的 member 写入 Redis 脏集，供 flusher 批量回写 DB。
-	IncrUserPlatformQuotaUsageCache(ctx context.Context, userID int64, platform string, cost float64, ttl time.Duration, markDirty bool) error
+	IncrUserPlatformQuotaUsageCache(ctx context.Context, userID int64, platform string, cost float64, ttl time.Duration, markDirty bool) (UserPlatformQuotaIncrementResult, error)
 
 	// 脏集读写，供 flusher 使用。
 	PopDirtyUserPlatformQuotaKeys(ctx context.Context, n int) ([]UserPlatformQuotaKey, error)

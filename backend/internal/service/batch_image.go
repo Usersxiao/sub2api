@@ -304,6 +304,9 @@ type BatchImageEvent struct {
 
 type BatchImageRepository interface {
 	CreateBatchImageJob(ctx context.Context, params CreateBatchImageJobParams) (*BatchImageJob, error)
+	// CreateBatchImageJobWithBalanceHold atomically creates a native job, its
+	// birth evidence, and its reserve (or zero-hold) lifecycle proof.
+	CreateBatchImageJobWithBalanceHold(ctx context.Context, params CreateBatchImageJobParams) (*BatchImageJob, error)
 	GetBatchImageJobByBatchID(ctx context.Context, batchID string) (*BatchImageJob, error)
 	GetBatchImageJobByIdempotencyKey(ctx context.Context, userID, apiKeyID int64, key string) (*BatchImageJob, error)
 	GetBatchImageJobByBatchIDForOwner(ctx context.Context, userID, apiKeyID int64, batchID string) (*BatchImageJob, error)

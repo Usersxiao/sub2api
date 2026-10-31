@@ -106,9 +106,17 @@ type Config struct {
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
+	ClientInvocation        ClientInvocationConfig        `mapstructure:"client_invocation"`
 
 	// Enforce only API-key spending windows in simple mode.
 	SimpleModeKeyRateLimitEnabled bool `mapstructure:"simple_mode_key_rate_limit_enabled" yaml:"simple_mode_key_rate_limit_enabled"`
+}
+
+// ClientInvocationConfig controls the AutoDesign client invoke endpoint.
+// When disabled, the endpoint still validates restricted grants and returns
+// MODEL_ADMISSION_UNAVAILABLE without reserving or dispatching anything.
+type ClientInvocationConfig struct {
+	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
 }
 
 // SimpleModeConfig controls startup behavior in simple mode.
@@ -2361,6 +2369,9 @@ func setDefaults() {
 	viper.SetDefault("plugins.max_upload_bytes", int64(128*1024*1024))
 	viper.SetDefault("plugins.max_uncompressed_bytes", int64(256*1024*1024))
 	viper.SetDefault("plugins.start_timeout_seconds", 15)
+
+	// AutoDesign client invocation stays closed until an operator enables it.
+	viper.SetDefault("client_invocation.enabled", false)
 
 	// Timezone (default to Asia/Shanghai for Chinese users)
 	viper.SetDefault("timezone", "Asia/Shanghai")

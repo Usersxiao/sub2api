@@ -1209,6 +1209,9 @@ func (h *AuthHandler) resolveOAuthBindTargetUserID(c *gin.Context) (*int64, erro
 	if err != nil {
 		return nil, err
 	}
+	if err := h.authService.ValidateActiveSession(c.Request.Context(), claims); err != nil {
+		return nil, err
+	}
 	user, err := h.userService.GetByID(c.Request.Context(), claims.UserID)
 	if err != nil {
 		return nil, err

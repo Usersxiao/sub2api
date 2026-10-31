@@ -23,6 +23,10 @@ const (
 	FieldDeletedAt = "deleted_at"
 	// FieldUserID holds the string denoting the user_id field in the database.
 	FieldUserID = "user_id"
+	// FieldKind holds the string denoting the kind field in the database.
+	FieldKind = "kind"
+	// FieldClientConsumerID holds the string denoting the client_consumer_id field in the database.
+	FieldClientConsumerID = "client_consumer_id"
 	// FieldKey holds the string denoting the key field in the database.
 	FieldKey = "key"
 	// FieldName holds the string denoting the name field in the database.
@@ -99,6 +103,8 @@ var Columns = []string{
 	FieldUpdatedAt,
 	FieldDeletedAt,
 	FieldUserID,
+	FieldKind,
+	FieldClientConsumerID,
 	FieldKey,
 	FieldName,
 	FieldGroupID,
@@ -144,6 +150,12 @@ var (
 	DefaultUpdatedAt func() time.Time
 	// UpdateDefaultUpdatedAt holds the default value on update for the "updated_at" field.
 	UpdateDefaultUpdatedAt func() time.Time
+	// DefaultKind holds the default value on creation for the "kind" field.
+	DefaultKind string
+	// KindValidator is a validator for the "kind" field. It is called by the builders before save.
+	KindValidator func(string) error
+	// ClientConsumerIDValidator is a validator for the "client_consumer_id" field. It is called by the builders before save.
+	ClientConsumerIDValidator func(string) error
 	// KeyValidator is a validator for the "key" field. It is called by the builders before save.
 	KeyValidator func(string) error
 	// NameValidator is a validator for the "name" field. It is called by the builders before save.
@@ -196,6 +208,16 @@ func ByDeletedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByUserID orders the results by the user_id field.
 func ByUserID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUserID, opts...).ToFunc()
+}
+
+// ByKind orders the results by the kind field.
+func ByKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldKind, opts...).ToFunc()
+}
+
+// ByClientConsumerID orders the results by the client_consumer_id field.
+func ByClientConsumerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldClientConsumerID, opts...).ToFunc()
 }
 
 // ByKey orders the results by the key field.

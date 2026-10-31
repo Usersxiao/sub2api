@@ -1663,6 +1663,7 @@ func (h *AuthHandler) bindPendingOAuthLogin(c *gin.Context, provider string) {
 			user.Email,
 			session.SessionToken,
 			session.BrowserSessionKey,
+			user.SessionEpoch,
 		)
 		if err != nil {
 			response.InternalError(c, "Failed to create 2FA session")

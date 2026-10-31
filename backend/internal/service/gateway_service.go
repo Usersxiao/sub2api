@@ -595,6 +595,33 @@ func (r *AccountSelectionResult) ProfitGateActive() bool {
 	return r != nil && r.profitGate != nil
 }
 
+func deferAccountSelectionSlot(selection *AccountSelectionResult, cfg config.GatewaySchedulingConfig) error {
+	if selection == nil || selection.Account == nil {
+		return ErrClientInvocationAdmissionUnavailable
+	}
+	if selection.Acquired {
+		if selection.ReleaseFunc == nil {
+			return ErrClientInvocationAdmissionUnavailable
+		}
+		release := selection.ReleaseFunc
+		selection.ReleaseFunc = nil
+		selection.Acquired = false
+		if selection.WaitPlan == nil {
+			selection.WaitPlan = &AccountWaitPlan{
+				AccountID:      selection.Account.ID,
+				MaxConcurrency: selection.Account.Concurrency,
+				Timeout:        cfg.FallbackWaitTimeout,
+				MaxWaiting:     cfg.FallbackMaxWaiting,
+			}
+		}
+		release()
+	}
+	if selection.WaitPlan == nil || selection.WaitPlan.AccountID != selection.Account.ID || selection.WaitPlan.MaxConcurrency <= 0 {
+		return ErrClientInvocationAdmissionUnavailable
+	}
+	return nil
+}
+
 // ClaudeUsage 表示Claude API返回的usage信息
 type ClaudeUsage struct {
 	InputTokens              int `json:"input_tokens"`

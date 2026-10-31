@@ -39,6 +39,18 @@ func (a *userPlatformQuotaServiceAdapter) IncrementUsageWithReset(ctx context.Co
 	return a.inner.IncrementUsageWithReset(ctx, userID, platform, cost, now)
 }
 
+func (a *userPlatformQuotaServiceAdapter) IncrementBoundUsage(ctx context.Context, binding service.UserPlatformQuotaUsageBinding) (service.UserPlatformQuotaBoundIncrementResult, error) {
+	return a.inner.IncrementBoundUsage(ctx, binding)
+}
+
+func (a *userPlatformQuotaServiceAdapter) ConsumeOrdinaryPlatformQuotaUsage(ctx context.Context, cmd *service.UsageBillingCommand, receipt *service.UsageBillingOrdinaryPlatformReceipt) (service.UsageBillingOrdinaryPlatformDeliveryResult, error) {
+	return a.inner.ConsumeOrdinaryPlatformQuotaUsage(ctx, cmd, receipt)
+}
+
+func (a *userPlatformQuotaServiceAdapter) GetOrdinaryPlatformQuotaUsageDelivery(ctx context.Context, cmd *service.UsageBillingCommand, receipt *service.UsageBillingOrdinaryPlatformReceipt) (*service.UsageBillingOrdinaryPlatformDeliveryResult, error) {
+	return a.inner.GetOrdinaryPlatformQuotaUsageDelivery(ctx, cmd, receipt)
+}
+
 // ListByUser 查询用户的所有平台配额记录。
 func (a *userPlatformQuotaServiceAdapter) ListByUser(ctx context.Context, userID int64) ([]service.UserPlatformQuotaRecord, error) {
 	rows, err := a.inner.ListByUser(ctx, userID)
@@ -48,6 +60,8 @@ func (a *userPlatformQuotaServiceAdapter) ListByUser(ctx context.Context, userID
 	out := make([]service.UserPlatformQuotaRecord, len(rows))
 	for i, r := range rows {
 		out[i] = service.UserPlatformQuotaRecord{
+			QuotaRowID:         r.QuotaRowID,
+			ControlGeneration:  r.ControlGeneration,
 			UserID:             r.UserID,
 			Platform:           r.Platform,
 			DailyLimitUSD:      r.DailyLimitUSD,
@@ -100,6 +114,8 @@ func (a *userPlatformQuotaServiceAdapter) BatchSnapshotUsage(ctx context.Context
 	repoSnaps := make([]UserPlatformQuotaSnapshot, len(snapshots))
 	for i, s := range snapshots {
 		repoSnaps[i] = UserPlatformQuotaSnapshot{
+			QuotaRowID:         s.QuotaRowID,
+			ControlGeneration:  s.ControlGeneration,
 			UserID:             s.UserID,
 			Platform:           s.Platform,
 			DailyUsageUSD:      s.DailyUsageUSD,
@@ -135,6 +151,30 @@ func (a *genericUserPlatformQuotaAdapter) IncrementUsageWithReset(ctx context.Co
 	return a.inner.IncrementUsageWithReset(ctx, userID, platform, cost, now)
 }
 
+func (a *genericUserPlatformQuotaAdapter) IncrementBoundUsage(ctx context.Context, binding service.UserPlatformQuotaUsageBinding) (service.UserPlatformQuotaBoundIncrementResult, error) {
+	writer, ok := a.inner.(service.UserPlatformQuotaBoundUsageRepository)
+	if !ok {
+		return service.UserPlatformQuotaBoundIncrementResult{}, fmt.Errorf("bound user platform quota writer unavailable")
+	}
+	return writer.IncrementBoundUsage(ctx, binding)
+}
+
+func (a *genericUserPlatformQuotaAdapter) ConsumeOrdinaryPlatformQuotaUsage(ctx context.Context, cmd *service.UsageBillingCommand, receipt *service.UsageBillingOrdinaryPlatformReceipt) (service.UsageBillingOrdinaryPlatformDeliveryResult, error) {
+	writer, ok := a.inner.(service.UserPlatformQuotaOrdinaryDeliveryRepository)
+	if !ok {
+		return service.UsageBillingOrdinaryPlatformDeliveryResult{}, fmt.Errorf("ordinary platform quota delivery writer unavailable")
+	}
+	return writer.ConsumeOrdinaryPlatformQuotaUsage(ctx, cmd, receipt)
+}
+
+func (a *genericUserPlatformQuotaAdapter) GetOrdinaryPlatformQuotaUsageDelivery(ctx context.Context, cmd *service.UsageBillingCommand, receipt *service.UsageBillingOrdinaryPlatformReceipt) (*service.UsageBillingOrdinaryPlatformDeliveryResult, error) {
+	writer, ok := a.inner.(service.UserPlatformQuotaOrdinaryDeliveryRepository)
+	if !ok {
+		return nil, fmt.Errorf("ordinary platform quota delivery reader unavailable")
+	}
+	return writer.GetOrdinaryPlatformQuotaUsageDelivery(ctx, cmd, receipt)
+}
+
 // ListByUser 查询用户的所有平台配额记录（通用 adapter 实现）。
 func (a *genericUserPlatformQuotaAdapter) ListByUser(ctx context.Context, userID int64) ([]service.UserPlatformQuotaRecord, error) {
 	rows, err := a.inner.ListByUser(ctx, userID)
@@ -144,6 +184,8 @@ func (a *genericUserPlatformQuotaAdapter) ListByUser(ctx context.Context, userID
 	out := make([]service.UserPlatformQuotaRecord, len(rows))
 	for i, r := range rows {
 		out[i] = service.UserPlatformQuotaRecord{
+			QuotaRowID:         r.QuotaRowID,
+			ControlGeneration:  r.ControlGeneration,
 			UserID:             r.UserID,
 			Platform:           r.Platform,
 			DailyLimitUSD:      r.DailyLimitUSD,
@@ -196,6 +238,8 @@ func (a *genericUserPlatformQuotaAdapter) BatchSnapshotUsage(ctx context.Context
 	repoSnaps := make([]UserPlatformQuotaSnapshot, len(snapshots))
 	for i, s := range snapshots {
 		repoSnaps[i] = UserPlatformQuotaSnapshot{
+			QuotaRowID:         s.QuotaRowID,
+			ControlGeneration:  s.ControlGeneration,
 			UserID:             s.UserID,
 			Platform:           s.Platform,
 			DailyUsageUSD:      s.DailyUsageUSD,
@@ -216,6 +260,8 @@ func (a *genericUserPlatformQuotaAdapter) BatchSnapshotUsage(ctx context.Context
 // toServiceRecord 将 repository.UserPlatformQuotaRecord 转换为 service.UserPlatformQuotaRecord。
 func toServiceRecord(rec *UserPlatformQuotaRecord) *service.UserPlatformQuotaRecord {
 	return &service.UserPlatformQuotaRecord{
+		QuotaRowID:         rec.QuotaRowID,
+		ControlGeneration:  rec.ControlGeneration,
 		UserID:             rec.UserID,
 		Platform:           rec.Platform,
 		DailyLimitUSD:      rec.DailyLimitUSD,
@@ -235,6 +281,8 @@ func toRepoRecords(records []service.UserPlatformQuotaRecord) []UserPlatformQuot
 	out := make([]UserPlatformQuotaRecord, len(records))
 	for i, r := range records {
 		out[i] = UserPlatformQuotaRecord{
+			QuotaRowID:         r.QuotaRowID,
+			ControlGeneration:  r.ControlGeneration,
 			UserID:             r.UserID,
 			Platform:           r.Platform,
 			DailyLimitUSD:      r.DailyLimitUSD,

@@ -72,6 +72,40 @@ func (_u *APIKeyUpdate) SetNillableUserID(v *int64) *APIKeyUpdate {
 	return _u
 }
 
+// SetKind sets the "kind" field.
+func (_u *APIKeyUpdate) SetKind(v string) *APIKeyUpdate {
+	_u.mutation.SetKind(v)
+	return _u
+}
+
+// SetNillableKind sets the "kind" field if the given value is not nil.
+func (_u *APIKeyUpdate) SetNillableKind(v *string) *APIKeyUpdate {
+	if v != nil {
+		_u.SetKind(*v)
+	}
+	return _u
+}
+
+// SetClientConsumerID sets the "client_consumer_id" field.
+func (_u *APIKeyUpdate) SetClientConsumerID(v string) *APIKeyUpdate {
+	_u.mutation.SetClientConsumerID(v)
+	return _u
+}
+
+// SetNillableClientConsumerID sets the "client_consumer_id" field if the given value is not nil.
+func (_u *APIKeyUpdate) SetNillableClientConsumerID(v *string) *APIKeyUpdate {
+	if v != nil {
+		_u.SetClientConsumerID(*v)
+	}
+	return _u
+}
+
+// ClearClientConsumerID clears the value of the "client_consumer_id" field.
+func (_u *APIKeyUpdate) ClearClientConsumerID() *APIKeyUpdate {
+	_u.mutation.ClearClientConsumerID()
+	return _u
+}
+
 // SetKey sets the "key" field.
 func (_u *APIKeyUpdate) SetKey(v string) *APIKeyUpdate {
 	_u.mutation.SetKey(v)
@@ -545,6 +579,16 @@ func (_u *APIKeyUpdate) defaults() error {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *APIKeyUpdate) check() error {
+	if v, ok := _u.mutation.Kind(); ok {
+		if err := apikey.KindValidator(v); err != nil {
+			return &ValidationError{Name: "kind", err: fmt.Errorf(`ent: validator failed for field "APIKey.kind": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.ClientConsumerID(); ok {
+		if err := apikey.ClientConsumerIDValidator(v); err != nil {
+			return &ValidationError{Name: "client_consumer_id", err: fmt.Errorf(`ent: validator failed for field "APIKey.client_consumer_id": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Key(); ok {
 		if err := apikey.KeyValidator(v); err != nil {
 			return &ValidationError{Name: "key", err: fmt.Errorf(`ent: validator failed for field "APIKey.key": %w`, err)}
@@ -586,6 +630,15 @@ func (_u *APIKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.DeletedAtCleared() {
 		_spec.ClearField(apikey.FieldDeletedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Kind(); ok {
+		_spec.SetField(apikey.FieldKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ClientConsumerID(); ok {
+		_spec.SetField(apikey.FieldClientConsumerID, field.TypeString, value)
+	}
+	if _u.mutation.ClientConsumerIDCleared() {
+		_spec.ClearField(apikey.FieldClientConsumerID, field.TypeString)
 	}
 	if value, ok := _u.mutation.Key(); ok {
 		_spec.SetField(apikey.FieldKey, field.TypeString, value)
@@ -856,6 +909,40 @@ func (_u *APIKeyUpdateOne) SetNillableUserID(v *int64) *APIKeyUpdateOne {
 	if v != nil {
 		_u.SetUserID(*v)
 	}
+	return _u
+}
+
+// SetKind sets the "kind" field.
+func (_u *APIKeyUpdateOne) SetKind(v string) *APIKeyUpdateOne {
+	_u.mutation.SetKind(v)
+	return _u
+}
+
+// SetNillableKind sets the "kind" field if the given value is not nil.
+func (_u *APIKeyUpdateOne) SetNillableKind(v *string) *APIKeyUpdateOne {
+	if v != nil {
+		_u.SetKind(*v)
+	}
+	return _u
+}
+
+// SetClientConsumerID sets the "client_consumer_id" field.
+func (_u *APIKeyUpdateOne) SetClientConsumerID(v string) *APIKeyUpdateOne {
+	_u.mutation.SetClientConsumerID(v)
+	return _u
+}
+
+// SetNillableClientConsumerID sets the "client_consumer_id" field if the given value is not nil.
+func (_u *APIKeyUpdateOne) SetNillableClientConsumerID(v *string) *APIKeyUpdateOne {
+	if v != nil {
+		_u.SetClientConsumerID(*v)
+	}
+	return _u
+}
+
+// ClearClientConsumerID clears the value of the "client_consumer_id" field.
+func (_u *APIKeyUpdateOne) ClearClientConsumerID() *APIKeyUpdateOne {
+	_u.mutation.ClearClientConsumerID()
 	return _u
 }
 
@@ -1345,6 +1432,16 @@ func (_u *APIKeyUpdateOne) defaults() error {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *APIKeyUpdateOne) check() error {
+	if v, ok := _u.mutation.Kind(); ok {
+		if err := apikey.KindValidator(v); err != nil {
+			return &ValidationError{Name: "kind", err: fmt.Errorf(`ent: validator failed for field "APIKey.kind": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.ClientConsumerID(); ok {
+		if err := apikey.ClientConsumerIDValidator(v); err != nil {
+			return &ValidationError{Name: "client_consumer_id", err: fmt.Errorf(`ent: validator failed for field "APIKey.client_consumer_id": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Key(); ok {
 		if err := apikey.KeyValidator(v); err != nil {
 			return &ValidationError{Name: "key", err: fmt.Errorf(`ent: validator failed for field "APIKey.key": %w`, err)}
@@ -1403,6 +1500,15 @@ func (_u *APIKeyUpdateOne) sqlSave(ctx context.Context) (_node *APIKey, err erro
 	}
 	if _u.mutation.DeletedAtCleared() {
 		_spec.ClearField(apikey.FieldDeletedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Kind(); ok {
+		_spec.SetField(apikey.FieldKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ClientConsumerID(); ok {
+		_spec.SetField(apikey.FieldClientConsumerID, field.TypeString, value)
+	}
+	if _u.mutation.ClientConsumerIDCleared() {
+		_spec.ClearField(apikey.FieldClientConsumerID, field.TypeString)
 	}
 	if value, ok := _u.mutation.Key(); ok {
 		_spec.SetField(apikey.FieldKey, field.TypeString, value)

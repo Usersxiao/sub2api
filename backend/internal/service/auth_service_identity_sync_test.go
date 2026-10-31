@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/stretchr/testify/require"
 
 	"entgo.io/ent/dialect"
@@ -138,6 +139,7 @@ CREATE TABLE IF NOT EXISTS user_provider_default_grants (
 	}, cfg)
 
 	svc := service.NewAuthService(client, repo, nil, nil, cfg, settingSvc, nil, nil, nil, nil, defaultSubAssigner, nil, nil)
+	svc.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 	return svc, repo, client
 }
 
@@ -170,7 +172,7 @@ func TestAuthServiceRegisterDualWritesEmailIdentity(t *testing.T) {
 	require.NotNil(t, identity.VerifiedAt)
 }
 
-func TestAuthServiceLoginDefersLastLoginTouchUntilRecordSuccessfulLogin(t *testing.T) {
+func TestAuthServiceLoginBackfillsBeforeIssuanceAndDefersLastLoginTouch(t *testing.T) {
 	svc, _, client := newAuthServiceWithEnt(t, map[string]string{
 		service.SettingKeyRegistrationEnabled: "true",
 	}, nil)
@@ -215,7 +217,7 @@ func TestAuthServiceLoginDefersLastLoginTouchUntilRecordSuccessfulLogin(t *testi
 		).
 		Count(ctx)
 	require.NoError(t, err)
-	require.Zero(t, identityCount)
+	require.Equal(t, 1, identityCount)
 
 	svc.RecordSuccessfulLogin(ctx, user.ID)
 
@@ -479,4 +481,48 @@ func countProviderGrantRecords(
 	require.NoError(t, rows.Scan(&count))
 	require.NoError(t, rows.Err())
 	return count
+}
+
+type passwordSnapshotRecheckRepo struct {
+	service.UserRepository
+	mutate func(*service.User)
+}
+
+func (r *passwordSnapshotRecheckRepo) GetByID(ctx context.Context, id int64) (*service.User, error) {
+	user, err := r.UserRepository.GetByID(ctx, id)
+	if err == nil {
+		r.mutate(user)
+	}
+	return user, err
+}
+
+func TestAuthServicePasswordSnapshotRecheckAfterIdentityBackfill(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mutate    func(*service.User)
+		wantError error
+	}{
+		{"new epoch and TOTP policy", func(user *service.User) { user.SessionEpoch++; user.TotpEnabled = true }, nil},
+		{"changed password", func(user *service.User) { _ = user.SetPassword("different-password") }, service.ErrInvalidCredentials},
+		{"changed email", func(user *service.User) { user.Email = "changed@example.com" }, service.ErrInvalidCredentials},
+		{"disabled account", func(user *service.User) { user.Status = service.StatusDisabled }, service.ErrUserNotActive},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, repo, client := newAuthServiceWithEnt(t, nil, nil)
+			user := &service.User{Email: "snapshot@example.com", Role: service.RoleUser, Status: service.StatusActive}
+			require.NoError(t, user.SetPassword("snapshot-password"))
+			require.NoError(t, repo.Create(context.Background(), user))
+			wrapped := &passwordSnapshotRecheckRepo{UserRepository: repo, mutate: tc.mutate}
+			svc := service.NewAuthService(client, wrapped, nil, nil, &config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil)
+			verified, err := svc.AuthenticatePassword(context.Background(), user.Email, "snapshot-password")
+			if tc.wantError != nil {
+				require.ErrorIs(t, err, tc.wantError)
+				require.Nil(t, verified)
+			} else {
+				require.NoError(t, err)
+				require.Greater(t, verified.SessionEpoch, user.SessionEpoch)
+				require.True(t, verified.TotpEnabled)
+			}
+		})
+	}
 }

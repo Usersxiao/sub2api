@@ -80,6 +80,11 @@ func PasswordHash(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldPasswordHash, v))
 }
 
+// SessionEpoch applies equality check predicate on the "session_epoch" field. It's identical to SessionEpochEQ.
+func SessionEpoch(v int64) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldSessionEpoch, v))
+}
+
 // Role applies equality check predicate on the "role" field. It's identical to RoleEQ.
 func Role(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldRole, v))
@@ -438,6 +443,46 @@ func PasswordHashEqualFold(v string) predicate.User {
 // PasswordHashContainsFold applies the ContainsFold predicate on the "password_hash" field.
 func PasswordHashContainsFold(v string) predicate.User {
 	return predicate.User(sql.FieldContainsFold(FieldPasswordHash, v))
+}
+
+// SessionEpochEQ applies the EQ predicate on the "session_epoch" field.
+func SessionEpochEQ(v int64) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldSessionEpoch, v))
+}
+
+// SessionEpochNEQ applies the NEQ predicate on the "session_epoch" field.
+func SessionEpochNEQ(v int64) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldSessionEpoch, v))
+}
+
+// SessionEpochIn applies the In predicate on the "session_epoch" field.
+func SessionEpochIn(vs ...int64) predicate.User {
+	return predicate.User(sql.FieldIn(FieldSessionEpoch, vs...))
+}
+
+// SessionEpochNotIn applies the NotIn predicate on the "session_epoch" field.
+func SessionEpochNotIn(vs ...int64) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldSessionEpoch, vs...))
+}
+
+// SessionEpochGT applies the GT predicate on the "session_epoch" field.
+func SessionEpochGT(v int64) predicate.User {
+	return predicate.User(sql.FieldGT(FieldSessionEpoch, v))
+}
+
+// SessionEpochGTE applies the GTE predicate on the "session_epoch" field.
+func SessionEpochGTE(v int64) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldSessionEpoch, v))
+}
+
+// SessionEpochLT applies the LT predicate on the "session_epoch" field.
+func SessionEpochLT(v int64) predicate.User {
+	return predicate.User(sql.FieldLT(FieldSessionEpoch, v))
+}
+
+// SessionEpochLTE applies the LTE predicate on the "session_epoch" field.
+func SessionEpochLTE(v int64) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldSessionEpoch, v))
 }
 
 // RoleEQ applies the EQ predicate on the "role" field.

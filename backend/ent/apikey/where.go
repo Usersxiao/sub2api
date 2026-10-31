@@ -75,6 +75,16 @@ func UserID(v int64) predicate.APIKey {
 	return predicate.APIKey(sql.FieldEQ(FieldUserID, v))
 }
 
+// Kind applies equality check predicate on the "kind" field. It's identical to KindEQ.
+func Kind(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldEQ(FieldKind, v))
+}
+
+// ClientConsumerID applies equality check predicate on the "client_consumer_id" field. It's identical to ClientConsumerIDEQ.
+func ClientConsumerID(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldEQ(FieldClientConsumerID, v))
+}
+
 // Key applies equality check predicate on the "key" field. It's identical to KeyEQ.
 func Key(v string) predicate.APIKey {
 	return predicate.APIKey(sql.FieldEQ(FieldKey, v))
@@ -308,6 +318,146 @@ func UserIDIn(vs ...int64) predicate.APIKey {
 // UserIDNotIn applies the NotIn predicate on the "user_id" field.
 func UserIDNotIn(vs ...int64) predicate.APIKey {
 	return predicate.APIKey(sql.FieldNotIn(FieldUserID, vs...))
+}
+
+// KindEQ applies the EQ predicate on the "kind" field.
+func KindEQ(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldEQ(FieldKind, v))
+}
+
+// KindNEQ applies the NEQ predicate on the "kind" field.
+func KindNEQ(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldNEQ(FieldKind, v))
+}
+
+// KindIn applies the In predicate on the "kind" field.
+func KindIn(vs ...string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldIn(FieldKind, vs...))
+}
+
+// KindNotIn applies the NotIn predicate on the "kind" field.
+func KindNotIn(vs ...string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldNotIn(FieldKind, vs...))
+}
+
+// KindGT applies the GT predicate on the "kind" field.
+func KindGT(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldGT(FieldKind, v))
+}
+
+// KindGTE applies the GTE predicate on the "kind" field.
+func KindGTE(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldGTE(FieldKind, v))
+}
+
+// KindLT applies the LT predicate on the "kind" field.
+func KindLT(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldLT(FieldKind, v))
+}
+
+// KindLTE applies the LTE predicate on the "kind" field.
+func KindLTE(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldLTE(FieldKind, v))
+}
+
+// KindContains applies the Contains predicate on the "kind" field.
+func KindContains(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldContains(FieldKind, v))
+}
+
+// KindHasPrefix applies the HasPrefix predicate on the "kind" field.
+func KindHasPrefix(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldHasPrefix(FieldKind, v))
+}
+
+// KindHasSuffix applies the HasSuffix predicate on the "kind" field.
+func KindHasSuffix(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldHasSuffix(FieldKind, v))
+}
+
+// KindEqualFold applies the EqualFold predicate on the "kind" field.
+func KindEqualFold(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldEqualFold(FieldKind, v))
+}
+
+// KindContainsFold applies the ContainsFold predicate on the "kind" field.
+func KindContainsFold(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldContainsFold(FieldKind, v))
+}
+
+// ClientConsumerIDEQ applies the EQ predicate on the "client_consumer_id" field.
+func ClientConsumerIDEQ(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldEQ(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDNEQ applies the NEQ predicate on the "client_consumer_id" field.
+func ClientConsumerIDNEQ(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldNEQ(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDIn applies the In predicate on the "client_consumer_id" field.
+func ClientConsumerIDIn(vs ...string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldIn(FieldClientConsumerID, vs...))
+}
+
+// ClientConsumerIDNotIn applies the NotIn predicate on the "client_consumer_id" field.
+func ClientConsumerIDNotIn(vs ...string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldNotIn(FieldClientConsumerID, vs...))
+}
+
+// ClientConsumerIDGT applies the GT predicate on the "client_consumer_id" field.
+func ClientConsumerIDGT(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldGT(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDGTE applies the GTE predicate on the "client_consumer_id" field.
+func ClientConsumerIDGTE(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldGTE(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDLT applies the LT predicate on the "client_consumer_id" field.
+func ClientConsumerIDLT(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldLT(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDLTE applies the LTE predicate on the "client_consumer_id" field.
+func ClientConsumerIDLTE(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldLTE(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDContains applies the Contains predicate on the "client_consumer_id" field.
+func ClientConsumerIDContains(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldContains(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDHasPrefix applies the HasPrefix predicate on the "client_consumer_id" field.
+func ClientConsumerIDHasPrefix(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldHasPrefix(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDHasSuffix applies the HasSuffix predicate on the "client_consumer_id" field.
+func ClientConsumerIDHasSuffix(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldHasSuffix(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDIsNil applies the IsNil predicate on the "client_consumer_id" field.
+func ClientConsumerIDIsNil() predicate.APIKey {
+	return predicate.APIKey(sql.FieldIsNull(FieldClientConsumerID))
+}
+
+// ClientConsumerIDNotNil applies the NotNil predicate on the "client_consumer_id" field.
+func ClientConsumerIDNotNil() predicate.APIKey {
+	return predicate.APIKey(sql.FieldNotNull(FieldClientConsumerID))
+}
+
+// ClientConsumerIDEqualFold applies the EqualFold predicate on the "client_consumer_id" field.
+func ClientConsumerIDEqualFold(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldEqualFold(FieldClientConsumerID, v))
+}
+
+// ClientConsumerIDContainsFold applies the ContainsFold predicate on the "client_consumer_id" field.
+func ClientConsumerIDContainsFold(v string) predicate.APIKey {
+	return predicate.APIKey(sql.FieldContainsFold(FieldClientConsumerID, v))
 }
 
 // KeyEQ applies the EQ predicate on the "key" field.

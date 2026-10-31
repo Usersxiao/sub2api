@@ -1,0 +1,20 @@
+export default {
+  title: 'AutoDesign client configuration',
+  description: 'Publish the model directory, purpose defaults and editable parameters for signed-in AutoDesign users. Group, subscription and model permissions are checked for each user.',
+  readOnly: 'This stage synchronizes configuration only. Model execution and gateway credentials are not enabled. Prices must be an empty array; RunningHub belongs to the separate digital-human module.',
+  loading: 'Loading client configuration…',
+  empty: 'The published directory is empty. Users remain signed in and see that no models are available.',
+  routeCount: '{count} routes configured. Users receive only routes permitted by their groups, channel models and configured accounts.',
+  editor: 'Published configuration (JSON)',
+  help: 'Keep instanceId stable. Each routes item contains groupIds and a route. Defaults map a purpose to an available routeId. Up to 200 routes, 100 parameters per route and 1 MiB. Do not put keys, tokens, addresses or channel details in public route fields.',
+  example: 'Route item example',
+  exampleHint: 'Add an item to routes and replace the group and model with existing configured values. For example, set defaults.chat to writing. This example does not create an account or enable execution.',
+  save: 'Publish client configuration',
+  saving: 'Publishing…',
+  reload: 'Reload saved configuration',
+  saved: 'Client configuration published. Signed-in clients refresh automatically within 30 seconds.',
+  invalidJSON: 'Enter a valid JSON configuration object.',
+  tooLarge: 'The configuration exceeds 1 MiB.',
+  loadError: 'Client configuration did not load. Try again.',
+  saveError: 'Configuration was not saved. Check the configuration and try again.'
+}

@@ -438,6 +438,46 @@ func TestOpenAIGatewayServiceRecordUsage_UsesUserSpecificGroupRate(t *testing.T)
 	require.Equal(t, 1, userRepo.deductCalls)
 }
 
+func TestOpenAIGatewayServiceRecordUsage_DeepSeekGroupRateChangeUsesCurrentRequestSnapshot(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{}
+	rateRepo := &openAIUserGroupRateRepoStub{}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, rateRepo)
+	groupID := int64(18)
+	accountRate := 1.0
+	account := &Account{ID: 3008, Platform: PlatformDeepseek, Type: AccountTypeAPIKey, RateMultiplier: &accountRate}
+	inputPrice, outputPrice := 1e-6, 2e-6
+	group := &Group{ID: groupID, Platform: PlatformDeepseek, RateMultiplier: 1,
+		ModelPricing: []ChannelModelPricing{{
+			Models: []string{"deepseek-v4-flash"}, BillingMode: BillingModeToken,
+			InputPrice: &inputPrice, OutputPrice: &outputPrice,
+		}},
+	}
+	svc.resolver = NewModelPricingResolver(nil, svc.billingService)
+	// Prime the same user/group lookup before the administrator changes 1 to 0.3.
+	require.Equal(t, 1.0, svc.ResolveUserGroupRateMultiplier(context.Background(), 2008, groupID, 1))
+	group.RateMultiplier = 0.3
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "deepseek-group-rate-change", Model: "deepseek-v4-flash",
+			Usage: OpenAIUsage{InputTokens: 1000, OutputTokens: 500},
+		},
+		APIKey: &APIKey{ID: 1008, GroupID: &groupID, Group: group},
+		User:   &User{ID: 2008}, Account: account,
+		PricingAt: time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, rateRepo.calls)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, 0.3, usageRepo.lastLog.RateMultiplier)
+	require.Greater(t, usageRepo.lastLog.TotalCost, 0.0)
+	require.InDelta(t, usageRepo.lastLog.TotalCost*0.3, usageRepo.lastLog.ActualCost, 1e-12)
+	require.Equal(t, 1.0, account.BillingRateMultiplier())
+	require.NotNil(t, billingRepo.lastCmd)
+	require.Equal(t, 1, billingRepo.calls)
+	require.InDelta(t, usageRepo.lastLog.ActualCost, billingRepo.lastCmd.BalanceCost, 1e-12)
+}
+
 func TestOpenAIGatewayServiceRecordUsage_PeakRateAffectsTokenModeImageOutputTokens(t *testing.T) {
 	groupID := int64(14)
 	groupRate := 1.0

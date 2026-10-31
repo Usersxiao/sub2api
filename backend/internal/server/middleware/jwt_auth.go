@@ -92,6 +92,17 @@ func jwtAuth(
 			return
 		}
 
+		// Every authenticated request checks the durable epoch/sid authority.
+		// Database outages retain their service-error semantics and never admit JWTs.
+		if err := authService.ValidateActiveSession(c.Request.Context(), claims); err != nil {
+			if errors.Is(err, service.ErrServiceUnavailable) {
+				AbortWithError(c, 503, "SERVICE_UNAVAILABLE", "Session verification temporarily unavailable")
+			} else {
+				AbortWithError(c, 401, "TOKEN_REVOKED", "Session has been revoked")
+			}
+			return
+		}
+
 		// 会话绑定校验：IP/UA 任一变化即撤销会话（功能可在系统设置中关闭）
 		if !enforceSessionBinding(c, authService, settingService, auditService, claims) {
 			return

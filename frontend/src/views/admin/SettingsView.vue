@@ -6346,6 +6346,7 @@
 
         <!-- Tab: General -->
         <div v-show="activeTab === 'general'" class="space-y-6">
+          <AutoDesignClientSettings />
           <!-- Site Settings -->
           <div class="card">
             <div
@@ -9009,6 +9010,7 @@ import {
   stepUpBlockReason,
 } from "@/composables/useStepUp";
 import AdminAccessKeysSettings from "@/components/admin/settings/AdminAccessKeysSettings.vue";
+import AutoDesignClientSettings from "@/components/admin/settings/AutoDesignClientSettings.vue";
 import TotpStepUpDialog from "@/components/auth/TotpStepUpDialog.vue";
 import { affiliatesAPI, type AffiliateAdminEntry, type SimpleUser as AffiliateSimpleUser } from "@/api/admin/affiliates";
 import { extractApiErrorMessage, extractI18nErrorMessage } from "@/utils/apiError";

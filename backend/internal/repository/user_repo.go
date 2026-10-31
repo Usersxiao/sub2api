@@ -165,6 +165,11 @@ func (r *userRepository) create(ctx context.Context, userIn *service.User, guard
 	if err := ensureEmailAuthIdentityWithClient(txCtx, txClient, created.ID, created.Email, "user_repo_create"); err != nil {
 		return err
 	}
+	// Identity creation advances the durable epoch in this same transaction.
+	created, err = txClient.User.Get(txCtx, created.ID)
+	if err != nil {
+		return err
+	}
 
 	if ownedTx != nil {
 		if err := ownedTx.Commit(); err != nil {
@@ -356,6 +361,10 @@ func (r *userRepository) Update(ctx context.Context, userIn *service.User, field
 	if err := replaceEmailAuthIdentityWithClient(txCtx, txClient, updated.ID, oldEmail, updated.Email, "user_repo_update"); err != nil {
 		return err
 	}
+	updated, err = txClient.User.Get(txCtx, updated.ID)
+	if err != nil {
+		return err
+	}
 
 	if tx != nil {
 		if err := tx.Commit(); err != nil {
@@ -364,6 +373,7 @@ func (r *userRepository) Update(ctx context.Context, userIn *service.User, field
 	}
 
 	userIn.UpdatedAt = updated.UpdatedAt
+	userIn.SessionEpoch = updated.SessionEpoch
 	return nil
 }
 
@@ -544,7 +554,7 @@ func (r *userRepository) ListWithFilters(ctx context.Context, params pagination.
 				dbuser.EmailContainsFold(filters.Search),
 				dbuser.UsernameContainsFold(filters.Search),
 				dbuser.NotesContainsFold(filters.Search),
-				dbuser.HasAPIKeysWith(apikey.KeyContainsFold(filters.Search)),
+				dbuser.HasAPIKeysWith(apikey.KeyContainsFold(filters.Search), apikey.KindEQ(service.APIKeyKindCredential), apikey.DeletedAtIsNil()),
 			),
 		)
 	}
@@ -563,6 +573,7 @@ func (r *userRepository) ListWithFilters(ctx context.Context, params pagination.
 		q = q.Where(dbuser.HasAPIKeysWith(
 			apikey.GroupIDEQ(filters.APIKeyGroupID),
 			apikey.DeletedAtIsNil(),
+			apikey.KindEQ(service.APIKeyKindCredential),
 		))
 	}
 
@@ -1532,6 +1543,7 @@ func applyUserEntityToService(dst *service.User, src *dbent.User) {
 		return
 	}
 	dst.ID = src.ID
+	dst.SessionEpoch = src.SessionEpoch
 	dst.SignupSource = src.SignupSource
 	dst.LastLoginAt = src.LastLoginAt
 	dst.LastActiveAt = src.LastActiveAt

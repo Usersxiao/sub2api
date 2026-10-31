@@ -22,6 +22,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/gin-gonic/gin"
 	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/require"
@@ -2417,6 +2418,7 @@ func TestLogin2FACompletesPendingOAuthBindAndConsumesSession(t *testing.T) {
 		existingUser.Email,
 		session.SessionToken,
 		session.BrowserSessionKey,
+		existingUser.SessionEpoch,
 	)
 	require.NoError(t, err)
 
@@ -2637,6 +2639,7 @@ CREATE TABLE IF NOT EXISTS user_affiliates (
 		affiliateService,
 		nil,
 	)
+	authSvc.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 	userSvc := service.NewUserService(userRepo, nil, nil, nil)
 	var totpSvc *service.TotpService
 	if options.totpCache != nil || options.totpEncryptor != nil {
@@ -3480,6 +3483,7 @@ func oauthPendingFlowServiceUser(entity *dbent.User) *service.User {
 		Username:            entity.Username,
 		Notes:               entity.Notes,
 		PasswordHash:        entity.PasswordHash,
+		SessionEpoch:        entity.SessionEpoch,
 		Role:                entity.Role,
 		Balance:             entity.Balance,
 		Concurrency:         entity.Concurrency,

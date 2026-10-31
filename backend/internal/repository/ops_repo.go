@@ -273,7 +273,7 @@ LEFT JOIN accounts a ON e.account_id = a.id
 LEFT JOIN groups g ON e.group_id = g.id
 LEFT JOIN users u ON e.user_id = u.id
 LEFT JOIN users u2 ON e.resolved_by_user_id = u2.id
-LEFT JOIN api_keys ak ON ak.id = e.api_key_id
+LEFT JOIN api_keys ak ON ak.id = e.api_key_id AND ak.kind = 'api_key'
 ` + where + `
 ORDER BY ` + opsErrorLogsOrderBy(filter) + `
 LIMIT $` + itoa(len(args)+1) + ` OFFSET $` + itoa(len(args)+2)
@@ -454,7 +454,7 @@ FROM ops_error_logs e
 LEFT JOIN users u ON e.user_id = u.id
 LEFT JOIN accounts a ON e.account_id = a.id
 LEFT JOIN groups g ON e.group_id = g.id
-LEFT JOIN api_keys ak ON ak.id = e.api_key_id
+LEFT JOIN api_keys ak ON ak.id = e.api_key_id AND ak.kind = 'api_key'
 WHERE e.id = $1
 LIMIT 1`
 

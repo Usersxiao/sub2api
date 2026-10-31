@@ -94,6 +94,27 @@ func (_u *UserUpdate) SetNillablePasswordHash(v *string) *UserUpdate {
 	return _u
 }
 
+// SetSessionEpoch sets the "session_epoch" field.
+func (_u *UserUpdate) SetSessionEpoch(v int64) *UserUpdate {
+	_u.mutation.ResetSessionEpoch()
+	_u.mutation.SetSessionEpoch(v)
+	return _u
+}
+
+// SetNillableSessionEpoch sets the "session_epoch" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableSessionEpoch(v *int64) *UserUpdate {
+	if v != nil {
+		_u.SetSessionEpoch(*v)
+	}
+	return _u
+}
+
+// AddSessionEpoch adds value to the "session_epoch" field.
+func (_u *UserUpdate) AddSessionEpoch(v int64) *UserUpdate {
+	_u.mutation.AddSessionEpoch(v)
+	return _u
+}
+
 // SetRole sets the "role" field.
 func (_u *UserUpdate) SetRole(v string) *UserUpdate {
 	_u.mutation.SetRole(v)
@@ -973,6 +994,11 @@ func (_u *UserUpdate) check() error {
 			return &ValidationError{Name: "password_hash", err: fmt.Errorf(`ent: validator failed for field "User.password_hash": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.SessionEpoch(); ok {
+		if err := user.SessionEpochValidator(v); err != nil {
+			return &ValidationError{Name: "session_epoch", err: fmt.Errorf(`ent: validator failed for field "User.session_epoch": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Role(); ok {
 		if err := user.RoleValidator(v); err != nil {
 			return &ValidationError{Name: "role", err: fmt.Errorf(`ent: validator failed for field "User.role": %w`, err)}
@@ -1022,6 +1048,12 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.PasswordHash(); ok {
 		_spec.SetField(user.FieldPasswordHash, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.SessionEpoch(); ok {
+		_spec.SetField(user.FieldSessionEpoch, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedSessionEpoch(); ok {
+		_spec.AddField(user.FieldSessionEpoch, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.Role(); ok {
 		_spec.SetField(user.FieldRole, field.TypeString, value)
@@ -1784,6 +1816,27 @@ func (_u *UserUpdateOne) SetNillablePasswordHash(v *string) *UserUpdateOne {
 	if v != nil {
 		_u.SetPasswordHash(*v)
 	}
+	return _u
+}
+
+// SetSessionEpoch sets the "session_epoch" field.
+func (_u *UserUpdateOne) SetSessionEpoch(v int64) *UserUpdateOne {
+	_u.mutation.ResetSessionEpoch()
+	_u.mutation.SetSessionEpoch(v)
+	return _u
+}
+
+// SetNillableSessionEpoch sets the "session_epoch" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableSessionEpoch(v *int64) *UserUpdateOne {
+	if v != nil {
+		_u.SetSessionEpoch(*v)
+	}
+	return _u
+}
+
+// AddSessionEpoch adds value to the "session_epoch" field.
+func (_u *UserUpdateOne) AddSessionEpoch(v int64) *UserUpdateOne {
+	_u.mutation.AddSessionEpoch(v)
 	return _u
 }
 
@@ -2679,6 +2732,11 @@ func (_u *UserUpdateOne) check() error {
 			return &ValidationError{Name: "password_hash", err: fmt.Errorf(`ent: validator failed for field "User.password_hash": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.SessionEpoch(); ok {
+		if err := user.SessionEpochValidator(v); err != nil {
+			return &ValidationError{Name: "session_epoch", err: fmt.Errorf(`ent: validator failed for field "User.session_epoch": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Role(); ok {
 		if err := user.RoleValidator(v); err != nil {
 			return &ValidationError{Name: "role", err: fmt.Errorf(`ent: validator failed for field "User.role": %w`, err)}
@@ -2745,6 +2803,12 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	}
 	if value, ok := _u.mutation.PasswordHash(); ok {
 		_spec.SetField(user.FieldPasswordHash, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.SessionEpoch(); ok {
+		_spec.SetField(user.FieldSessionEpoch, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedSessionEpoch(); ok {
+		_spec.AddField(user.FieldSessionEpoch, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.Role(); ok {
 		_spec.SetField(user.FieldRole, field.TypeString, value)

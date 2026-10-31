@@ -38,7 +38,7 @@ describe('refreshAuthTokens', () => {
     vi.resetModules()
     Object.defineProperty(navigator, 'locks', {
       configurable: true,
-      value: undefined
+      value: { request: vi.fn(async (_name: string, callback: () => Promise<unknown>) => callback()) }
     })
   })
 
@@ -108,9 +108,10 @@ describe('refreshAuthTokens', () => {
     expect(mockedPost).toHaveBeenCalledTimes(1)
   })
 
-  it('recovers when a peer publishes the rotated token just after this request fails', async () => {
+  it('reconciles a new sign-in that replaces storage after a refresh request fails', async () => {
+    vi.useFakeTimers()
     seedSession()
-    mockedPost.mockRejectedValueOnce(new Error('refresh token already used'))
+    mockedPost.mockRejectedValueOnce(new Error('temporary network failure'))
     const { refreshAuthTokens } = await import('@/api/tokenRefresh')
 
     window.setTimeout(() => {
@@ -119,38 +120,89 @@ describe('refreshAuthTokens', () => {
       localStorage.setItem('refresh_token', 'peer-refresh')
     }, 10)
 
-    await expect(
+    const result = expect(
       refreshAuthTokens({ failedAccessToken: 'old-access' })
     ).resolves.toMatchObject({
       access_token: 'peer-access',
       refresh_token: 'peer-refresh'
     })
+    await vi.advanceTimersByTimeAsync(25)
+    await result
   })
 
-  it('waits for a slow peer after losing a refresh-token race without Web Locks', async () => {
-    vi.useFakeTimers()
+  it('serializes two tabs before a strict server can revoke their session for refresh replay', async () => {
     seedSession()
+    let queue = Promise.resolve<unknown>(undefined)
+    const request = vi.fn((_name: string, callback: () => Promise<unknown>) => {
+      const result = queue.then(callback)
+      queue = result.then(() => undefined, () => undefined)
+      return result
+    })
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: { request } })
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
     let resolveWinningRequest!: (value: ReturnType<typeof refreshedResponse>) => void
-    mockedPost.mockImplementationOnce(
-      () => new Promise((resolve) => {
+    const consumed = new Set<string>()
+    let sessionRevoked = false
+    mockedPost.mockImplementation((_url, body) => {
+      const token = (body as { refresh_token: string }).refresh_token
+      if (consumed.has(token)) {
+        sessionRevoked = true
+        return Promise.reject({ response: { status: 401, data: { reason: 'REFRESH_TOKEN_REUSED' } } })
+      }
+      consumed.add(token)
+      entered()
+      return new Promise((resolve) => {
         resolveWinningRequest = resolve
       })
-    )
+    })
     const firstTab = await import('@/api/tokenRefresh')
     vi.resetModules()
     const secondTab = await import('@/api/tokenRefresh')
 
     const winner = firstTab.refreshAuthTokens({ failedAccessToken: 'old-access' })
-    mockedPost.mockRejectedValueOnce({ response: { status: 401 } })
-    const loser = secondTab.refreshAuthTokens({ failedAccessToken: 'old-access' })
-
-    window.setTimeout(() => resolveWinningRequest(refreshedResponse()), 1_500)
-    await vi.advanceTimersByTimeAsync(1_600)
+    await started
+    const peer = secondTab.refreshAuthTokens({ failedAccessToken: 'old-access' })
+    expect(mockedPost).toHaveBeenCalledTimes(1)
+    resolveWinningRequest(refreshedResponse())
 
     await expect(winner).resolves.toMatchObject({ access_token: 'new-access' })
-    await expect(loser).resolves.toMatchObject({ refresh_token: 'new-refresh' })
-    expect(mockedPost).toHaveBeenCalledTimes(2)
+    await expect(peer).resolves.toMatchObject({ refresh_token: 'new-refresh' })
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(mockedPost).toHaveBeenCalledTimes(1)
+    expect(sessionRevoked).toBe(false)
     expect(localStorage.getItem('refresh_token')).toBe('new-refresh')
+  })
+
+  it('sends no refresh request and adopts no peer result when two tabs lack Web Locks', async () => {
+    seedSession({ token_expires_at: String(Date.now() + 60_000) })
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined })
+    const firstTab = await import('@/api/tokenRefresh')
+    vi.resetModules()
+    const secondTab = await import('@/api/tokenRefresh')
+    const results = Promise.allSettled([
+      firstTab.refreshAuthTokens({ failedAccessToken: 'old-access' }),
+      secondTab.refreshAuthTokens({ failedAccessToken: 'old-access' })
+    ])
+    for (const result of await results) {
+      expect(result.status).toBe('rejected')
+      if (result.status === 'rejected') expect(result.reason).toMatchObject({
+        name: 'TokenRefreshCoordinationError', code: 'TOKEN_REFRESH_COORDINATION_UNAVAILABLE'
+      })
+    }
+    expect(mockedPost).not.toHaveBeenCalled()
+    expect(localStorage.getItem('auth_token')).toBe('old-access')
+    expect(localStorage.getItem('refresh_token')).toBe('old-refresh')
+
+    // Even an already-published peer pair is not mistaken for permission to
+    // resume uncoordinated rotation in an unsupported browser.
+    seedSession({ auth_token: 'peer-access', refresh_token: 'peer-refresh',
+      token_expires_at: String(Date.now() + 3600_000) })
+    await expect(secondTab.refreshAuthTokens({ failedAccessToken: 'old-access' })).rejects.toMatchObject({
+      code: 'TOKEN_REFRESH_COORDINATION_UNAVAILABLE'
+    })
+    expect(mockedPost).not.toHaveBeenCalled()
+    expect(localStorage.getItem('refresh_token')).toBe('peer-refresh')
   })
 
   it('does not adopt a token from a different signed-in user', async () => {

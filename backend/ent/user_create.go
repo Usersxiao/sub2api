@@ -88,6 +88,20 @@ func (_c *UserCreate) SetPasswordHash(v string) *UserCreate {
 	return _c
 }
 
+// SetSessionEpoch sets the "session_epoch" field.
+func (_c *UserCreate) SetSessionEpoch(v int64) *UserCreate {
+	_c.mutation.SetSessionEpoch(v)
+	return _c
+}
+
+// SetNillableSessionEpoch sets the "session_epoch" field if the given value is not nil.
+func (_c *UserCreate) SetNillableSessionEpoch(v *int64) *UserCreate {
+	if v != nil {
+		_c.SetSessionEpoch(*v)
+	}
+	return _c
+}
+
 // SetRole sets the "role" field.
 func (_c *UserCreate) SetRole(v string) *UserCreate {
 	_c.mutation.SetRole(v)
@@ -614,6 +628,10 @@ func (_c *UserCreate) defaults() error {
 		v := user.DefaultUpdatedAt()
 		_c.mutation.SetUpdatedAt(v)
 	}
+	if _, ok := _c.mutation.SessionEpoch(); !ok {
+		v := user.DefaultSessionEpoch
+		_c.mutation.SetSessionEpoch(v)
+	}
 	if _, ok := _c.mutation.Role(); !ok {
 		v := user.DefaultRole
 		_c.mutation.SetRole(v)
@@ -699,6 +717,14 @@ func (_c *UserCreate) check() error {
 	if v, ok := _c.mutation.PasswordHash(); ok {
 		if err := user.PasswordHashValidator(v); err != nil {
 			return &ValidationError{Name: "password_hash", err: fmt.Errorf(`ent: validator failed for field "User.password_hash": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.SessionEpoch(); !ok {
+		return &ValidationError{Name: "session_epoch", err: errors.New(`ent: missing required field "User.session_epoch"`)}
+	}
+	if v, ok := _c.mutation.SessionEpoch(); ok {
+		if err := user.SessionEpochValidator(v); err != nil {
+			return &ValidationError{Name: "session_epoch", err: fmt.Errorf(`ent: validator failed for field "User.session_epoch": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.Role(); !ok {
@@ -812,6 +838,10 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.PasswordHash(); ok {
 		_spec.SetField(user.FieldPasswordHash, field.TypeString, value)
 		_node.PasswordHash = value
+	}
+	if value, ok := _c.mutation.SessionEpoch(); ok {
+		_spec.SetField(user.FieldSessionEpoch, field.TypeInt64, value)
+		_node.SessionEpoch = value
 	}
 	if value, ok := _c.mutation.Role(); ok {
 		_spec.SetField(user.FieldRole, field.TypeString, value)
@@ -1208,6 +1238,24 @@ func (u *UserUpsert) SetPasswordHash(v string) *UserUpsert {
 // UpdatePasswordHash sets the "password_hash" field to the value that was provided on create.
 func (u *UserUpsert) UpdatePasswordHash() *UserUpsert {
 	u.SetExcluded(user.FieldPasswordHash)
+	return u
+}
+
+// SetSessionEpoch sets the "session_epoch" field.
+func (u *UserUpsert) SetSessionEpoch(v int64) *UserUpsert {
+	u.Set(user.FieldSessionEpoch, v)
+	return u
+}
+
+// UpdateSessionEpoch sets the "session_epoch" field to the value that was provided on create.
+func (u *UserUpsert) UpdateSessionEpoch() *UserUpsert {
+	u.SetExcluded(user.FieldSessionEpoch)
+	return u
+}
+
+// AddSessionEpoch adds v to the "session_epoch" field.
+func (u *UserUpsert) AddSessionEpoch(v int64) *UserUpsert {
+	u.Add(user.FieldSessionEpoch, v)
 	return u
 }
 
@@ -1622,6 +1670,27 @@ func (u *UserUpsertOne) SetPasswordHash(v string) *UserUpsertOne {
 func (u *UserUpsertOne) UpdatePasswordHash() *UserUpsertOne {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdatePasswordHash()
+	})
+}
+
+// SetSessionEpoch sets the "session_epoch" field.
+func (u *UserUpsertOne) SetSessionEpoch(v int64) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSessionEpoch(v)
+	})
+}
+
+// AddSessionEpoch adds v to the "session_epoch" field.
+func (u *UserUpsertOne) AddSessionEpoch(v int64) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.AddSessionEpoch(v)
+	})
+}
+
+// UpdateSessionEpoch sets the "session_epoch" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateSessionEpoch() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSessionEpoch()
 	})
 }
 
@@ -2253,6 +2322,27 @@ func (u *UserUpsertBulk) SetPasswordHash(v string) *UserUpsertBulk {
 func (u *UserUpsertBulk) UpdatePasswordHash() *UserUpsertBulk {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdatePasswordHash()
+	})
+}
+
+// SetSessionEpoch sets the "session_epoch" field.
+func (u *UserUpsertBulk) SetSessionEpoch(v int64) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSessionEpoch(v)
+	})
+}
+
+// AddSessionEpoch adds v to the "session_epoch" field.
+func (u *UserUpsertBulk) AddSessionEpoch(v int64) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.AddSessionEpoch(v)
+	})
+}
+
+// UpdateSessionEpoch sets the "session_epoch" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateSessionEpoch() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSessionEpoch()
 	})
 }
 

@@ -13,7 +13,9 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,6 +63,7 @@ func newJWTTestEnv(users map[int64]*service.User) (*gin.Engine, *service.AuthSer
 
 	userRepo := &stubJWTUserRepo{users: users}
 	authSvc := service.NewAuthService(nil, userRepo, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	authSvc.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 	userSvc := service.NewUserService(userRepo, nil, nil, nil)
 	mw := NewJWTAuthMiddleware(authSvc, userSvc, nil, nil)
 
@@ -144,6 +147,7 @@ func TestJWTAuth_ValidToken_TouchesLastActive(t *testing.T) {
 
 	userRepo := &stubJWTUserRepo{users: map[int64]*service.User{1: user}}
 	authSvc := service.NewAuthService(nil, userRepo, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	authSvc.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
 	userSvc := service.NewUserService(userRepo, nil, nil, nil)
 	toucher := &recordingActivityToucher{}
 
@@ -236,7 +240,8 @@ func TestJWTAuth_UserLookupErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{JWT: config.JWTConfig{Secret: "test-secret", ExpireHour: 1}}
 	authSvc := service.NewAuthService(nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
-	token, err := authSvc.GenerateToken(context.Background(), &service.User{ID: 1, Role: service.RoleAdmin})
+	authSvc.SetAuthSessionRepository(testutil.NewAuthSessionRepository())
+	token, err := authSvc.GenerateToken(context.Background(), &service.User{ID: 1, Role: service.RoleAdmin, Status: service.StatusActive})
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
@@ -329,7 +334,9 @@ func TestJWTAuth_UserInactive(t *testing.T) {
 	}
 	router, authSvc := newJWTTestEnv(map[int64]*service.User{1: user})
 
-	token, err := authSvc.GenerateToken(context.Background(), user)
+	activeUser := *user
+	activeUser.Status = service.StatusActive
+	token, err := authSvc.GenerateToken(context.Background(), &activeUser)
 	require.NoError(t, err)
 
 	w := httptest.NewRecorder()
@@ -373,4 +380,42 @@ func TestJWTAuth_TokenVersionMismatch(t *testing.T) {
 	var body ErrorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	require.Equal(t, "TOKEN_REVOKED", body.Code)
+}
+
+func TestJWTAuth_DurableRevocationAndOutage(t *testing.T) {
+	ctx := context.Background()
+	user := &service.User{ID: 1, Email: "sessions@example.com", Role: service.RoleUser, Status: service.StatusActive}
+	router, authSvc := newJWTTestEnv(map[int64]*service.User{1: user})
+	sessions := testutil.NewAuthSessionRepository()
+	authSvc.SetAuthSessionRepository(sessions)
+	token, err := authSvc.GenerateToken(ctx, user)
+	require.NoError(t, err)
+	request := func(token string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		router.ServeHTTP(w, req)
+		return w
+	}
+	require.Equal(t, http.StatusOK, request(token).Code)
+	sessions.ReadErr = errors.New("connection lost")
+	require.Equal(t, http.StatusServiceUnavailable, request(token).Code)
+	sessions.ReadErr = nil
+	require.Equal(t, http.StatusOK, request(token).Code)
+
+	claims, err := authSvc.ValidateToken(token)
+	require.NoError(t, err)
+	legacy := *claims
+	legacy.SessionEpoch = 0
+	legacyToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &legacy).SignedString([]byte("test-jwt-secret-32bytes-long!!!"))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusUnauthorized, request(legacyToken).Code)
+
+	require.NoError(t, authSvc.RevokeSessionFamily(ctx, claims.SessionID))
+	require.Equal(t, http.StatusUnauthorized, request(token).Code)
+	freshToken, err := authSvc.GenerateToken(ctx, user)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, request(freshToken).Code)
+	require.NoError(t, authSvc.RevokeAllUserTokens(ctx, user.ID))
+	require.Equal(t, http.StatusUnauthorized, request(freshToken).Code)
 }

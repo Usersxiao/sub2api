@@ -1776,3 +1776,12 @@ func (s *OpenAIGatewayService) schedulingConfig() config.GatewaySchedulingConfig
 		SlotCleanupInterval:      30 * time.Second,
 	}
 }
+
+// DeferAccountSelectionSlot releases a scheduler-acquired slot and leaves the
+// selection ready for the existing handler to acquire after trusted counting.
+func (s *OpenAIGatewayService) DeferAccountSelectionSlot(selection *AccountSelectionResult) error {
+	if s == nil {
+		return ErrClientInvocationAdmissionUnavailable
+	}
+	return deferAccountSelectionSlot(selection, s.schedulingConfig())
+}

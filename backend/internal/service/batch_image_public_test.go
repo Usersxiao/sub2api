@@ -346,7 +346,7 @@ func TestBatchImagePublicService_Submit(t *testing.T) {
 		require.Len(t, vertex.submits, 1)
 	})
 
-	t.Run("insufficient balance rejects before provider submit", func(t *testing.T) {
+	t.Run("insufficient balance leaves no native job", func(t *testing.T) {
 		svc, repo, queue, gemini, _ := newTestBatchImagePublicService(true)
 		billing := &fakeBatchImageBillingRepo{err: ErrBatchImageInsufficientBalance}
 		svc.BillingRepo = billing
@@ -357,12 +357,7 @@ func TestBatchImagePublicService_Submit(t *testing.T) {
 		require.Empty(t, gemini.submits)
 		require.Len(t, billing.reserves, 1)
 		require.Empty(t, billing.releases)
-		require.Len(t, repo.jobs, 1)
-		for _, job := range repo.jobs {
-			require.Equal(t, BatchImageJobStatusFailed, job.Status)
-			require.Equal(t, "INSUFFICIENT_BALANCE", batchImageDerefString(job.LastErrorCode))
-			require.NotNil(t, job.UserDeletedAt)
-		}
+		require.Empty(t, repo.jobs)
 	})
 
 	t.Run("provider failure marks failed and does not enqueue", func(t *testing.T) {
@@ -767,6 +762,9 @@ func newTestBatchImagePublicService(enabled bool) (*BatchImagePublicService, *fa
 			DefaultResponseMimeType: "image/png",
 			DefaultImageSize:        "1K",
 		}},
+	}
+	repo.nativeCreateHook = func(ctx context.Context, params CreateBatchImageJobParams) error {
+		return fakeBatchImageNativeReserve(ctx, params, svc.BillingRepo)
 	}
 	return svc, repo, queue, gemini, vertex
 }
