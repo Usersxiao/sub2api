@@ -20,6 +20,20 @@ func RegisterClientInvocationRoutes(v1 *gin.RouterGroup, h *handler.Handlers) {
 	v1.GET("/client/invocations/:project_id/:request_id", h.ClientInvocation.GetInvocation)
 }
 
+// RegisterEditingTemplatePublicRoutes exposes only approved catalog entries.
+func RegisterEditingTemplatePublicRoutes(v1 *gin.RouterGroup, h *handler.Handlers, panelRateLimiter *middleware.PanelRateLimiter) {
+	if v1 == nil || h == nil || h.EditingTemplate == nil {
+		return
+	}
+	catalog := v1.Group("/editing-template-catalog")
+	catalog.Use(panelRateLimiter.PublicIP())
+	{
+		catalog.GET("", h.EditingTemplate.ListPublic)
+		catalog.GET("/:id", h.EditingTemplate.GetPublic)
+		catalog.GET("/:id/artifacts/:kind", h.EditingTemplate.DownloadPublicArtifact)
+	}
+}
+
 // RegisterUserRoutes 注册用户相关路由（需要认证）
 func RegisterUserRoutes(
 	v1 *gin.RouterGroup,
@@ -97,6 +111,17 @@ func RegisterUserRoutes(
 				passkeys.PATCH("/:id", h.Passkey.Rename)
 				passkeys.DELETE("/:id", h.Passkey.Delete)
 			}
+		}
+
+		if h.EditingTemplate != nil {
+			editingTemplates := authenticated.Group("/editing-templates")
+			editingTemplates.GET("", h.EditingTemplate.ListMine)
+			editingTemplates.POST("", h.EditingTemplate.Create)
+			editingTemplates.GET("/:id", h.EditingTemplate.GetMine)
+			editingTemplates.PUT("/:id", h.EditingTemplate.Update)
+			editingTemplates.PUT("/:id/artifacts/:kind", h.EditingTemplate.UploadArtifact)
+			editingTemplates.GET("/:id/artifacts/:kind", h.EditingTemplate.DownloadMineArtifact)
+			editingTemplates.POST("/:id/submit", h.EditingTemplate.Submit)
 		}
 
 		// API Key管理

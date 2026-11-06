@@ -106,6 +106,7 @@ type Config struct {
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
+	EditingTemplates        EditingTemplateConfig         `mapstructure:"editing_templates"`
 	ClientInvocation        ClientInvocationConfig        `mapstructure:"client_invocation"`
 
 	// Enforce only API-key spending windows in simple mode.
@@ -133,6 +134,26 @@ type PluginConfig struct {
 	MaxUploadBytes       int64             `mapstructure:"max_upload_bytes"`
 	MaxUncompressedBytes int64             `mapstructure:"max_uncompressed_bytes"`
 	StartTimeoutSeconds  int               `mapstructure:"start_timeout_seconds"`
+}
+
+// EditingTemplateConfig controls the server-side editing-template artifact store.
+type EditingTemplateConfig struct {
+	Storage         string                  `mapstructure:"storage"` // local or s3 (including MinIO)
+	DataDir         string                  `mapstructure:"data_dir"`
+	S3              EditingTemplateS3Config `mapstructure:"s3"`
+	MaxProjectBytes int64                   `mapstructure:"max_project_bytes"`
+	MaxCoverBytes   int64                   `mapstructure:"max_cover_bytes"`
+	MaxPreviewBytes int64                   `mapstructure:"max_preview_bytes"`
+}
+
+type EditingTemplateS3Config struct {
+	Endpoint        string `mapstructure:"endpoint"`
+	Region          string `mapstructure:"region"`
+	Bucket          string `mapstructure:"bucket"`
+	AccessKeyID     string `mapstructure:"access_key_id"`
+	SecretAccessKey string `mapstructure:"secret_access_key"`
+	Prefix          string `mapstructure:"prefix"`
+	ForcePathStyle  bool   `mapstructure:"force_path_style"`
 }
 
 type LogConfig struct {
@@ -2369,6 +2390,17 @@ func setDefaults() {
 	viper.SetDefault("plugins.max_upload_bytes", int64(128*1024*1024))
 	viper.SetDefault("plugins.max_uncompressed_bytes", int64(256*1024*1024))
 	viper.SetDefault("plugins.start_timeout_seconds", 15)
+
+	// AutoDesign editing-template review artifacts. Local development stores
+	// these below DATA_DIR; production can swap the storage implementation.
+	viper.SetDefault("editing_templates.data_dir", "")
+	viper.SetDefault("editing_templates.storage", "local")
+	viper.SetDefault("editing_templates.s3.region", "us-east-1")
+	viper.SetDefault("editing_templates.s3.prefix", "editing-templates")
+	viper.SetDefault("editing_templates.s3.force_path_style", true)
+	viper.SetDefault("editing_templates.max_project_bytes", int64(256*1024*1024))
+	viper.SetDefault("editing_templates.max_cover_bytes", int64(16*1024*1024))
+	viper.SetDefault("editing_templates.max_preview_bytes", int64(256*1024*1024))
 
 	// AutoDesign client invocation stays closed until an operator enables it.
 	viper.SetDefault("client_invocation.enabled", false)

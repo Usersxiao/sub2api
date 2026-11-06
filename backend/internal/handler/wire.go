@@ -50,6 +50,7 @@ func ProvideAdminHandlers(
 	affiliateHandler *admin.AffiliateHandler,
 	complianceHandler *admin.ComplianceHandler,
 	auditLogHandler *admin.AuditLogHandler,
+	editingTemplateHandler *admin.EditingTemplateHandler,
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,
 	opencodeGoUsage *service.OpenCodeGoUsageService,
@@ -96,6 +97,7 @@ func ProvideAdminHandlers(
 		Affiliate:              affiliateHandler,
 		Compliance:             complianceHandler,
 		AuditLog:               auditLogHandler,
+		EditingTemplate:        editingTemplateHandler,
 	}
 }
 
@@ -208,6 +210,7 @@ func ProvideHandlers(
 	asyncImageHandler *AsyncImageHandler,
 	batchImageHandler *BatchImageHandler,
 	runningHubHandler *RunningHubHandler,
+	editingTemplateHandler *EditingTemplateHandler,
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
 	_ *service.OpenAIQuotaAutoResetService,
@@ -237,6 +240,7 @@ func ProvideHandlers(
 		AsyncImage:          asyncImageHandler,
 		BatchImage:          batchImageHandler,
 		RunningHub:          runningHubHandler,
+		EditingTemplate:     editingTemplateHandler,
 	}
 }
 
@@ -266,6 +270,7 @@ var ProviderSet = wire.NewSet(
 	NewAsyncImageHandler,
 	ProvideBatchImageHandler,
 	NewRunningHubHandler,
+	NewEditingTemplateHandler,
 
 	// Admin handlers
 	admin.NewDashboardHandler,
@@ -303,6 +308,7 @@ var ProviderSet = wire.NewSet(
 	admin.NewAffiliateHandler,
 	admin.NewComplianceHandler,
 	admin.NewAuditLogHandler,
+	admin.NewEditingTemplateHandler,
 
 	// AdminHandlers and Handlers constructors
 	ProvideAdminHandlers,

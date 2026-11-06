@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -253,4 +254,20 @@ func TestClientInvocationGatewayDispatchFailsClosedWithoutOwnedContext(t *testin
 	_, err := adapter.DispatchClientInvocation(context.Background(), prepared)
 	require.ErrorIs(t, err, errClientInvocationGatewayAdapterUnavailable)
 	require.Zero(t, gateway.calls)
+}
+
+func TestClientInvocationAdmissionReportsAnAccountThatCannotPay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	refuse := func(status int, code string) error {
+		recorder := newClientInvocationResponseWriter()
+		c, _ := gin.CreateTestContext(recorder)
+		middleware.AbortWithError(c, status, code, "refused")
+		return clientInvocationAdmissionFailure(recorder)
+	}
+	for _, code := range []string{"INSUFFICIENT_BALANCE", "USAGE_LIMIT_EXCEEDED", "API_KEY_QUOTA_EXHAUSTED"} {
+		require.ErrorIs(t, refuse(http.StatusForbidden, code), service.ErrClientInvocationQuotaExhausted, code)
+	}
+	// Other refusals stay a temporary admission outage.
+	require.ErrorIs(t, refuse(http.StatusServiceUnavailable, "API_KEY_AUTH_OVERLOADED"), service.ErrClientInvocationAdmissionUnavailable)
+	require.ErrorIs(t, clientInvocationAdmissionFailure(newClientInvocationResponseWriter()), service.ErrClientInvocationAdmissionUnavailable)
 }

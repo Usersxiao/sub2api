@@ -31,6 +31,13 @@ type ClientInvocationResponse struct {
 // results from protocols already admitted by ValidateClientTextInvocation.
 // Usage is mandatory because the caller must settle the actual upstream charge.
 func ParseClientInvocationResponse(protocol string, raw []byte) (*ClientInvocationResponse, error) {
+	return ParseClientInvocationResponseForTools(protocol, raw, nil)
+}
+
+// ParseClientInvocationResponseForTools also applies the request's tool
+// profile to returned calls: an editing turn keeps a complete paid reply whose
+// calls cannot all run (see parseClientToolCalls).
+func ParseClientInvocationResponseForTools(protocol string, raw []byte, tools []string) (*ClientInvocationResponse, error) {
 	if len(raw) == 0 || len(raw) > ClientInvocationMaxBytes || !utf8.Valid(raw) || !validClientInvocationJSON(raw) {
 		return nil, ErrClientInvocationResponse
 	}
@@ -60,7 +67,7 @@ func ParseClientInvocationResponse(protocol string, raw []byte) (*ClientInvocati
 		}
 	case "chat-completions":
 		var output *ClientInvocationResponse
-		output, err = parseClientChatCompletionsOutput(fields)
+		output, err = parseClientChatCompletionsOutput(fields, clientEditingProfile(tools))
 		if err == nil {
 			text, reasoning, finishReason, calls = output.Text, output.Reasoning, output.FinishReason, output.ToolCalls
 			usage, err = parseClientChatCompletionsUsage(fields["usage"])
@@ -172,7 +179,7 @@ func parseClientMessagesText(fields map[string]json.RawMessage) (string, error) 
 	return text.String(), nil
 }
 
-func parseClientChatCompletionsOutput(fields map[string]json.RawMessage) (*ClientInvocationResponse, error) {
+func parseClientChatCompletionsOutput(fields map[string]json.RawMessage, editing bool) (*ClientInvocationResponse, error) {
 	var choices []json.RawMessage
 	if readClientArray(fields["choices"], &choices) != nil || len(choices) != 1 {
 		return nil, ErrClientInvocationResponse
@@ -214,7 +221,7 @@ func parseClientChatCompletionsOutput(fields map[string]json.RawMessage) (*Clien
 		return result, nil
 	}
 	if finish == "tool_calls" {
-		calls, err := parseClientToolCalls(message["tool_calls"])
+		calls, err := parseClientToolCalls(message["tool_calls"], editing)
 		if err != nil {
 			return nil, err
 		}

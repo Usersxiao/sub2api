@@ -538,6 +538,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/editing-templates',
+    name: 'AdminEditingTemplates',
+    component: () => import('@/views/admin/EditingTemplatesView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Editing Template Review',
+      titleKey: 'admin.editingTemplates.title',
+      descriptionKey: 'admin.editingTemplates.description'
+    }
+  },
+  {
     path: '/admin/announcements',
     name: 'AdminAnnouncements',
     component: () => import('@/views/admin/AnnouncementsView.vue'),

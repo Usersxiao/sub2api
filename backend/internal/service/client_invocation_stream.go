@@ -292,14 +292,19 @@ type clientInvocationStreamTool struct {
 	} `json:"function"`
 }
 
+// A reply may announce more calls than one round runs; the tool profile
+// decides what happens to them once the reply is complete. This bounds only
+// how many the stream buffers.
+const clientStreamToolSlots = 32
+
 func (s *ClientInvocationChatStream) appendTools(raw json.RawMessage) error {
 	var deltas []map[string]json.RawMessage
-	if json.Unmarshal(raw, &deltas) != nil || len(deltas) > 8 {
+	if json.Unmarshal(raw, &deltas) != nil || len(deltas) > clientStreamToolSlots {
 		return ErrClientInvocationResponse
 	}
 	for _, delta := range deltas {
 		index, err := readClientInteger(delta["index"])
-		if err != nil || index < 0 || index > 7 || index > int64(len(s.tools)) {
+		if err != nil || index < 0 || index >= clientStreamToolSlots || index > int64(len(s.tools)) {
 			return ErrClientInvocationResponse
 		}
 		if index == int64(len(s.tools)) {

@@ -129,6 +129,9 @@ func RegisterAdminRoutes(
 		// 风控中心
 		registerContentModerationRoutes(admin, h)
 
+		// AutoDesign 剪辑模板审核
+		registerEditingTemplateRoutes(admin, h, stepUpAuth)
+
 		// 独立提示词输入审计
 		registerPromptAuditRoutes(admin, h)
 
@@ -137,6 +140,21 @@ func RegisterAdminRoutes(
 
 		// 操作审计日志
 		registerAuditLogRoutes(admin, h, stepUpAuth)
+	}
+}
+
+func registerEditingTemplateRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
+	if h == nil || h.Admin == nil || h.Admin.EditingTemplate == nil {
+		return
+	}
+	templates := admin.Group("/editing-templates")
+	{
+		templates.GET("", h.Admin.EditingTemplate.List)
+		templates.GET("/:id", h.Admin.EditingTemplate.Get)
+		templates.GET("/:id/artifacts/:kind", h.Admin.EditingTemplate.DownloadArtifact)
+		templates.POST("/:id/approve", gin.HandlerFunc(stepUpAuth), h.Admin.EditingTemplate.Approve)
+		templates.POST("/:id/reject", gin.HandlerFunc(stepUpAuth), h.Admin.EditingTemplate.Reject)
+		templates.POST("/:id/unlist", gin.HandlerFunc(stepUpAuth), h.Admin.EditingTemplate.Unlist)
 	}
 }
 

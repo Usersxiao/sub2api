@@ -169,6 +169,17 @@ func NewClientInvocationGatewayAdapter(gateway *GatewayHandler, openAI *OpenAIGa
 	return adapter
 }
 
+// clientInvocationAdmissionFailure reads the refusal billing admission wrote.
+// An account that cannot pay is told so; anything else stays a temporary outage.
+func clientInvocationAdmissionFailure(recorder *clientInvocationResponseWriter) error {
+	switch gjson.GetBytes(recorder.body.Bytes(), "code").String() {
+	case "INSUFFICIENT_BALANCE", "USAGE_LIMIT_EXCEEDED", "API_KEY_QUOTA_EXHAUSTED":
+		return service.ErrClientInvocationQuotaExhausted
+	default:
+		return service.ErrClientInvocationAdmissionUnavailable
+	}
+}
+
 func (a *ClientInvocationGatewayAdapter) AdmitClientInvocation(ctx context.Context, prepared *service.PreparedClientInvocation) (context.Context, func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -228,7 +239,7 @@ func (a *ClientInvocationGatewayAdapter) AdmitClientInvocation(ctx context.Conte
 	}
 	c.Request = req
 	if !a.admit(c, identity, prepared.Grant, prepared.Resolution.GroupID) {
-		return nil, nil, service.ErrClientInvocationAdmissionUnavailable
+		return nil, nil, clientInvocationAdmissionFailure(recorder)
 	}
 	boundIdentity, ok := middleware.GetAPIKeyFromContext(c)
 	if !ok || !clientInvocationBillingIdentityMatches(identity, boundIdentity) {

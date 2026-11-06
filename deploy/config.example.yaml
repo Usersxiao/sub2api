@@ -1086,6 +1086,27 @@ plugins:
   start_timeout_seconds: 15
 
 # =============================================================================
+# AutoDesign Editing Template Artifacts (Optional)
+# AutoDesign 剪辑模板审核文件（可选）
+# =============================================================================
+editing_templates:
+  storage: "local" # local or s3; use s3 for MinIO
+  # Empty means {{DATA_DIR}}/editing-templates, or ./data/editing-templates.
+  # 留空时使用 {{DATA_DIR}}/editing-templates；未设置 DATA_DIR 时使用 ./data/editing-templates。
+  data_dir: ""
+  s3:
+    endpoint: "" # e.g. http://127.0.0.1:19000 for local MinIO
+    region: "us-east-1"
+    bucket: ""
+    access_key_id: ""
+    secret_access_key: ""
+    prefix: "editing-templates"
+    force_path_style: true
+  max_project_bytes: 268435456
+  max_cover_bytes: 16777216
+  max_preview_bytes: 268435456
+
+# =============================================================================
 # Pricing Data Source (Optional)
 # 定价数据源（可选）
 # =============================================================================

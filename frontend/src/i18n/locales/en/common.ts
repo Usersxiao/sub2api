@@ -183,6 +183,7 @@ export default {
     subscriptions: 'Subscriptions',
     accounts: 'Accounts',
     plugins: 'Plugins',
+    editingTemplates: 'Template Review',
     proxies: 'Proxies',
     redeemCodes: 'Redeem Codes',
     ops: 'Ops',

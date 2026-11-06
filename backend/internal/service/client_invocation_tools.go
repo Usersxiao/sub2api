@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 type ClientInvocationToolCall struct {
@@ -176,7 +177,7 @@ func validClientToolHistory(req *ClientInvocationRequest) bool {
 	ids := map[string]bool{}
 	rounds := map[string]bool{}
 	for _, round := range req.ToolRounds {
-		if !clientIdentifier.MatchString(round.RoundID) || rounds[round.RoundID] || len(round.Text) > ClientInvocationMaxBytes || len(round.Reasoning) > ClientInvocationMaxBytes || len(round.Calls) == 0 || len(round.Calls) > 8 || len(round.Calls) != len(round.Results) {
+		if !clientIdentifier.MatchString(round.RoundID) || rounds[round.RoundID] || len(round.Text) > ClientInvocationMaxBytes || len(round.Reasoning) > ClientInvocationMaxBytes || len(round.Calls) == 0 || len(round.Calls) > clientToolCallsPerRound || len(round.Calls) != len(round.Results) {
 			return false
 		}
 		rounds[round.RoundID] = true
@@ -274,7 +275,22 @@ func clientAutoCutToolSchema() map[string]any {
 	}}
 }
 
-func parseClientToolCalls(raw json.RawMessage) ([]ClientInvocationToolCall, error) {
+// One tool round carries at most this many calls, in replies and in history.
+const clientToolCallsPerRound = 8
+
+// clientRejectedToolKey marks an auto_cut call that sub did not let through.
+// It is server-owned: a model-supplied key of that name is removed.
+const clientRejectedToolKey = "rejected"
+
+// parseClientToolCalls returns the calls of a complete reply. A call identity
+// that is missing or repeated is never recoverable. Otherwise an editing turn
+// keeps its already billed reply when a call cannot run — more parallel calls
+// than one round admits, arguments that are not bounded JSON, an invalid
+// auto_cut envelope, or an editor tool called natively: that call becomes an
+// auto_cut call carrying only its rejection, which the client answers with an
+// error result so the model can correct it in the next round. File tools keep
+// their strict batch.
+func parseClientToolCalls(raw json.RawMessage, editing bool) ([]ClientInvocationToolCall, error) {
 	var wire []struct {
 		ID       string `json:"id"`
 		Type     string `json:"type"`
@@ -283,18 +299,71 @@ func parseClientToolCalls(raw json.RawMessage) ([]ClientInvocationToolCall, erro
 			Arguments string `json:"arguments"`
 		} `json:"function"`
 	}
-	if json.Unmarshal(raw, &wire) != nil || len(wire) == 0 || len(wire) > 8 {
+	if json.Unmarshal(raw, &wire) != nil || len(wire) == 0 || (!editing && len(wire) > clientToolCallsPerRound) {
 		return nil, ErrClientInvocationResponse
 	}
 	calls := []ClientInvocationToolCall{}
 	seen := map[string]bool{}
-	for _, item := range wire {
-		call := ClientInvocationToolCall{CallID: item.ID, Name: item.Function.Name}
-		if item.Type != "function" || !validClientInvocationJSON([]byte(item.Function.Arguments)) || json.Unmarshal([]byte(item.Function.Arguments), &call.Arguments) != nil || !validClientToolCall(call) || seen[call.CallID] {
+	for index, item := range wire {
+		if item.Type != "function" || !clientIdentifier.MatchString(item.ID) || seen[item.ID] {
 			return nil, ErrClientInvocationResponse
 		}
-		seen[call.CallID] = true
+		seen[item.ID] = true
+		if editing && index == clientToolCallsPerRound-1 && len(wire) > clientToolCallsPerRound {
+			calls = append(calls, rejectedClientAutoCutCall(item.ID, fmt.Sprintf(
+				"This round requested %d tool calls, but at most %d run per round. This call and the %d after it were not run; request them again in later rounds.",
+				len(wire), clientToolCallsPerRound, len(wire)-clientToolCallsPerRound)))
+			// The calls after this one are dropped, but never with a reused identity.
+			for _, rest := range wire[index+1:] {
+				if !clientIdentifier.MatchString(rest.ID) || seen[rest.ID] {
+					return nil, ErrClientInvocationResponse
+				}
+				seen[rest.ID] = true
+			}
+			break
+		}
+		call := ClientInvocationToolCall{CallID: item.ID, Name: item.Function.Name}
+		if !validClientInvocationJSON([]byte(item.Function.Arguments)) || json.Unmarshal([]byte(item.Function.Arguments), &call.Arguments) != nil || !validClientToolCall(call) {
+			if !editing {
+				return nil, ErrClientInvocationResponse
+			}
+			call = rejectedClientAutoCutCall(item.ID, rejectedClientCallReason(item.Function.Name, item.Function.Arguments))
+		} else if editing {
+			delete(call.Arguments, clientRejectedToolKey)
+		}
 		calls = append(calls, call)
 	}
 	return calls, nil
+}
+
+func rejectedClientAutoCutCall(callID, reason string) ClientInvocationToolCall {
+	encoded, _ := json.Marshal(reason)
+	return ClientInvocationToolCall{CallID: callID, Name: clientAutoCutTool, Arguments: map[string]json.RawMessage{
+		"operation": json.RawMessage(`"tools"`), clientRejectedToolKey: encoded,
+	}}
+}
+
+// The reason is addressed to the model, which wrote the rejected call.
+func rejectedClientCallReason(name, arguments string) string {
+	if name != clientAutoCutTool {
+		if len(name) > 200 {
+			name = name[:200]
+		}
+		return fmt.Sprintf("This call was not run: auto_cut is the only tool in this conversation. Call the editor tool %q as auto_cut with operation=\"call\", tool=%q and its arguments.", name, name)
+	}
+	var fields map[string]json.RawMessage
+	if !validClientInvocationJSON([]byte(arguments)) || json.Unmarshal([]byte(arguments), &fields) != nil || fields == nil {
+		return "This call was not run: its arguments were not one JSON object within the limits (nesting depth 16, 10000 values, 200 keys per object). Send complete JSON arguments matching the tool schema."
+	}
+	return "This call was not run: auto_cut needs operation set to one of tools, call, state, settings or context; operation=\"call\" needs tool; arguments must be an object; names holds at most 12 exact tool names; query is at most 500 characters."
+}
+
+func clientRejectedToolCalls(calls []ClientInvocationToolCall) int {
+	count := 0
+	for _, call := range calls {
+		if call.Name == clientAutoCutTool && call.Arguments[clientRejectedToolKey] != nil {
+			count++
+		}
+	}
+	return count
 }
